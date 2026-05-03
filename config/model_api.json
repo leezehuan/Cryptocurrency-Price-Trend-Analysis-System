@@ -1,0 +1,25 @@
+{
+  "active_provider": "openai_compatible",
+  "providers": {
+    "openai_compatible": {
+      "name": "OpenAI Compatible API",
+      "base_url": "https://fastapi.aabao.top/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "api_key": "",
+      "chat_model": "gpt-4o-mini",
+      "temperature": 0.2,
+      "max_tokens": 1200,
+      "timeout_seconds": 30
+    },
+    "local_ollama": {
+      "name": "Local Ollama",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key_env": "OLLAMA_API_KEY",
+      "api_key": "ollama",
+      "chat_model": "qwen2.5:7b",
+      "temperature": 0.2,
+      "max_tokens": 1200,
+      "timeout_seconds": 60
+    }
+  }
+}
