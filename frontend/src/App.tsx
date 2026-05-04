@@ -417,7 +417,7 @@ type AgentRunReplay = {
 
 type AppView = 'overview' | 'analysts' | 'accounts' | 'predictions' | 'agent' | 'settings';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/bit';
 const MARKET_INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'];
 const APP_VIEWS: { id: AppView; label: string; description: string }[] = [
   { id: 'overview', label: '总览', description: '关键指标与今日待办' },

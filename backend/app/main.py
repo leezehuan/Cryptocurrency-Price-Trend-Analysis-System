@@ -5,7 +5,7 @@ import json
 import sqlite3
 from collections.abc import Generator
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -64,6 +64,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def strip_bit_prefix(request: Request, call_next):
+    if request.scope["path"] == "/bit":
+        request.scope["path"] = "/"
+    elif request.scope["path"].startswith("/bit/"):
+        request.scope["path"] = request.scope["path"][len("/bit") :]
+    return await call_next(request)
 
 
 @app.on_event("startup")
