@@ -17,6 +17,7 @@ HIGH_CONFIDENCE_TERMS = ["确定", "强烈", "大概率", "明确", "必然"]
 LOW_CONFIDENCE_TERMS = ["可能", "也许", "或许", "不确定", "倾向"]
 BINANCE_SPOT_TICKER_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
 BINANCE_FUTURES_PREMIUM_INDEX_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
+GATEIO_SPOT_TICKERS_URL = "https://api.gateio.ws/api/v4/spot/tickers"
 
 
 def parse_setting_value(value: str, value_type: str) -> Any:
@@ -161,31 +162,22 @@ def latest_market(
 
 def fetch_live_market_price(symbol: str = "BTCUSDT", market_type: str = "perpetual") -> dict[str, Any]:
     symbol = symbol.upper()
-    if market_type == "perpetual":
-        query = urllib.parse.urlencode({"symbol": symbol})
-        url = f"{BINANCE_FUTURES_PREMIUM_INDEX_URL}?{query}"
-        request = urllib.request.Request(url, headers={"User-Agent": "btc-agent-mvp/0.1"})
-        with urllib.request.urlopen(request, timeout=5) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        return {
-            "symbol": symbol,
-            "market_type": market_type,
-            "price": float(data.get("markPrice") or data.get("indexPrice") or 0),
-            "funding_rate": float(data.get("lastFundingRate") or 0),
-            "source": "binance_futures_premium_index",
-            "fetched_at": utc_now(),
-        }
-    query = urllib.parse.urlencode({"symbol": symbol})
-    url = f"{BINANCE_SPOT_TICKER_PRICE_URL}?{query}"
+    gateio_pair = symbol.replace("USDT", "_USDT")
+    query = urllib.parse.urlencode({"currency_pair": gateio_pair})
+    url = f"{GATEIO_SPOT_TICKERS_URL}?{query}"
     request = urllib.request.Request(url, headers={"User-Agent": "btc-agent-mvp/0.1"})
     with urllib.request.urlopen(request, timeout=5) as response:
         data = json.loads(response.read().decode("utf-8"))
+    item = data[0] if isinstance(data, list) and data else {}
+    price = float(item.get("last") or 0)
+    if price <= 0:
+        raise RuntimeError("gateio_spot_ticker: live price is empty")
     return {
         "symbol": symbol,
         "market_type": market_type,
-        "price": float(data.get("price") or 0),
+        "price": price,
         "funding_rate": None,
-        "source": "binance_spot_ticker",
+        "source": "gateio_spot_ticker",
         "fetched_at": utc_now(),
     }
 

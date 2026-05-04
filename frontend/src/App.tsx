@@ -404,13 +404,13 @@ type AgentRunReplay = {
   focus_predictions?: Prediction[];
 };
 
-type AppView = 'overview' | 'market' | 'accounts' | 'predictions' | 'agent' | 'settings';
+type AppView = 'overview' | 'analysts' | 'accounts' | 'predictions' | 'agent' | 'settings';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 const MARKET_INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'];
 const APP_VIEWS: { id: AppView; label: string; description: string }[] = [
   { id: 'overview', label: '总览', description: '关键指标与今日待办' },
-  { id: 'market', label: '行情', description: '实时价格与多周期行情' },
+  { id: 'analysts', label: '分析师数据', description: '评分、账户与预测数据' },
   { id: 'accounts', label: '账户', description: 'AI 聚合账户与交易员账户' },
   { id: 'predictions', label: '预测验证', description: '预测、验证与回放' },
   { id: 'agent', label: 'Agent 与报告', description: '运行记录、日报与人工确认' },
@@ -576,6 +576,7 @@ export function App() {
   const [message, setMessage] = useState('');
   const [streamEvents, setStreamEvents] = useState<AgentStreamEvent[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
+  const [debugPanelCollapsed, setDebugPanelCollapsed] = useState(true);
 
   const appendStreamEvent = (event: AgentStreamEvent) => {
     setStreamEvents((current) => {
@@ -926,6 +927,54 @@ export function App() {
   const riskLevel = marginUsage >= 50 || Math.abs(accountSummary?.drawdown || 0) >= 20 ? '高' : marginUsage >= 25 || Math.abs(accountSummary?.drawdown || 0) >= 10 ? '中' : '低';
   const displayPrice = livePrice?.price || market?.latest_price;
   const liveSourceText = livePrice?.source === 'db_fallback' ? '数据库备用价' : livePrice?.source === 'unavailable' ? '实时源不可用' : livePrice?.source ? 'Binance 实时价' : '等待实时价格';
+  const rankedAnalysts = [...analysts].sort((left, right) => Number(right.total_score || 0) - Number(left.total_score || 0));
+  const topAnalysts = rankedAnalysts.slice(0, 8);
+  const analystDetailCards = (
+    <div className="analyst-list">
+      {rankedAnalysts.map((analyst) => (
+        <article className="analyst-card" key={analyst.id}>
+          <div>
+            <strong>{analyst.name}</strong>
+            <p>{analyst.latest_opinion || '暂无最新观点'}</p>
+          </div>
+          <div className="score-pill">{formatNumber(analyst.total_score)} 分</div>
+          <div className="mini-grid">
+            <span>硬胜率 {formatNumber(analyst.hard_win_rate ?? analyst.direction_win_rate)}%</span>
+            <span>加权 {formatNumber(analyst.weighted_win_rate)}%</span>
+            <span>方向 {formatNumber(analyst.direction_accuracy ?? analyst.direction_win_rate)}%</span>
+            <span>目标 {formatNumber(analyst.target_accuracy ?? analyst.target_hit_rate)}%</span>
+            <span>稳定 {formatNumber(analyst.stability_score)}%</span>
+            <span>改口 {formatNumber(analyst.modification_rate)}%</span>
+            <span>账户ROI {formatNumber(analyst.account_roi ?? analyst.virtual_roi)}%</span>
+            <span>短期 {formatNumber(analyst.short_win_rate)}%</span>
+            <span>中期 {formatNumber(analyst.medium_win_rate)}%</span>
+            <span>长期 {formatNumber(analyst.long_win_rate)}%</span>
+            <span>权益 {formatNumber(analyst.account_equity)} USDT</span>
+            <span>持仓 {formatNumber(analyst.open_position_count, 0)} 个</span>
+            <span>预测 {formatNumber(analyst.prediction_count, 0)} 条</span>
+          </div>
+        </article>
+      ))}
+      {!rankedAnalysts.length && <div className="empty">暂无分析师。</div>}
+    </div>
+  );
+  const agentRunList = (
+    <div className="run-list">
+      {agentRuns.map((run) => (
+        <article className="run-card" key={run.id}>
+          <div className="run-head">
+            <strong>{decisionText(run.decision)}</strong>
+            <span>{formatDate(run.created_at)}</span>
+          </div>
+          <p>{run.market_summary}</p>
+          <p>{run.opinion_summary}</p>
+          <em>{run.output?.trade_event || run.risk}</em>
+          <button className="ghost-button tiny" type="button" onClick={() => loadAgentReplay(run.id)} disabled={loading}>节点回放</button>
+        </article>
+      ))}
+      {!agentRuns.length && <div className="empty">暂无 Agent 运行记录。</div>}
+    </div>
+  );
 
   return (
     <main className="app-shell">
@@ -964,26 +1013,38 @@ export function App() {
         ))}
       </nav>
 
-      <section className="stream-panel">
-        <div className="stream-head">
-          <div>
-            <strong>AI 流式输出窗口</strong>
-            <span>{streamConnected ? '实时连接中' : '等待连接'} · 所有 Tab 均显示</span>
-          </div>
-          <button className="ghost-button tiny" type="button" onClick={() => setStreamEvents([])}>清空</button>
-        </div>
-        <div className="stream-list">
-          {streamEvents.slice(0, 12).map((event) => (
-            <article className={`stream-item ${event.status === 'failed' || event.type === 'error' ? 'failed' : ''}`} key={`${event.type || 'event'}-${event.id}-${event.created_at || ''}`}>
-              <div className="stream-meta">
-                <span>{streamEventTitle(event)}</span>
-                <em>{formatDate(event.created_at || undefined)}</em>
+      <section className={`debug-panel ${debugPanelCollapsed ? 'collapsed' : 'expanded'}`}>
+        {debugPanelCollapsed ? (
+          <button className="debug-tab" type="button" onClick={() => setDebugPanelCollapsed(false)}>
+            <strong>调试窗口</strong>
+            <span>{streamConnected ? '已连接' : '未连接'} · {formatNumber(streamEvents.length, 0)} 条</span>
+          </button>
+        ) : (
+          <div className="debug-body">
+            <div className="stream-head">
+              <div>
+                <strong>调试窗口</strong>
+                <span>{streamConnected ? '实时连接中' : '等待连接'} · AI 节点输出</span>
               </div>
-              <p>{event.message}</p>
-            </article>
-          ))}
-          {!streamEvents.length && <div className="empty">等待 AI 节点输出、报告生成、观点解析或交易决策。</div>}
-        </div>
+              <div className="debug-actions">
+                <button className="ghost-button tiny" type="button" onClick={() => setStreamEvents([])}>清空</button>
+                <button className="ghost-button tiny" type="button" onClick={() => setDebugPanelCollapsed(true)}>收起</button>
+              </div>
+            </div>
+            <div className="stream-list">
+              {streamEvents.slice(0, 12).map((event) => (
+                <article className={`stream-item ${event.status === 'failed' || event.type === 'error' ? 'failed' : ''}`} key={`${event.type || 'event'}-${event.id}-${event.created_at || ''}`}>
+                  <div className="stream-meta">
+                    <span>{streamEventTitle(event)}</span>
+                    <em>{formatDate(event.created_at || undefined)}</em>
+                  </div>
+                  <p>{event.message}</p>
+                </article>
+              ))}
+              {!streamEvents.length && <div className="empty">等待 AI 节点输出、报告生成、观点解析或交易决策。</div>}
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="metrics-grid">
@@ -1153,7 +1214,7 @@ export function App() {
       </section>
       )}
 
-      {(activeView === 'overview' || activeView === 'market') && (
+      {activeView === 'overview' && (
       <section className="main-grid">
         <div className="panel market-panel">
           <div className="panel-title">
@@ -1214,6 +1275,17 @@ export function App() {
       </section>
       )}
 
+      <section className={activeView === 'analysts' ? 'panel analyst-data-panel' : 'hidden'}>
+        <div className="panel-title compact">
+          <div>
+            <h2>分析师数据</h2>
+            <p>完整展示分析师评分、胜率、稳定性、账户收益、权益、持仓与预测数据。</p>
+          </div>
+          <LineChart />
+        </div>
+        {analystDetailCards}
+      </section>
+
       <section className={activeView === 'predictions' ? 'panel' : 'hidden'}>
         <div className="panel-title compact">
           <div>
@@ -1267,41 +1339,24 @@ export function App() {
         </div>
       </section>
 
-      <section className={activeView === 'overview' || activeView === 'agent' ? 'two-columns' : 'hidden'}>
+      <section className={activeView === 'overview' ? 'two-columns' : 'hidden'}>
         <div className="panel">
           <div className="panel-title compact">
             <div>
-              <h2>分析师评分</h2>
-              <p>保留方向胜率、目标命中、稳定性和虚拟收益。</p>
+              <h2>分析师排行榜</h2>
+              <p>按综合分排序，仅展示分数。</p>
             </div>
             <LineChart />
           </div>
-          <div className="analyst-list">
-            {analysts.map((analyst) => (
-              <article className="analyst-card" key={analyst.id}>
-                <div>
-                  <strong>{analyst.name}</strong>
-                  <p>{analyst.latest_opinion || '暂无最新观点'}</p>
-                </div>
+          <div className="leaderboard-list">
+            {topAnalysts.map((analyst, index) => (
+              <article className="leaderboard-item" key={analyst.id}>
+                <span className="leaderboard-rank">#{index + 1}</span>
+                <strong>{analyst.name}</strong>
                 <div className="score-pill">{formatNumber(analyst.total_score)} 分</div>
-                <div className="mini-grid">
-                  <span>硬胜率 {formatNumber(analyst.hard_win_rate ?? analyst.direction_win_rate)}%</span>
-                  <span>加权 {formatNumber(analyst.weighted_win_rate)}%</span>
-                  <span>方向 {formatNumber(analyst.direction_accuracy ?? analyst.direction_win_rate)}%</span>
-                  <span>目标 {formatNumber(analyst.target_accuracy ?? analyst.target_hit_rate)}%</span>
-                  <span>稳定 {formatNumber(analyst.stability_score)}%</span>
-                  <span>改口 {formatNumber(analyst.modification_rate)}%</span>
-                  <span>账户ROI {formatNumber(analyst.account_roi ?? analyst.virtual_roi)}%</span>
-                  <span>短期 {formatNumber(analyst.short_win_rate)}%</span>
-                  <span>中期 {formatNumber(analyst.medium_win_rate)}%</span>
-                  <span>长期 {formatNumber(analyst.long_win_rate)}%</span>
-                  <span>权益 {formatNumber(analyst.account_equity)} USDT</span>
-                  <span>持仓 {formatNumber(analyst.open_position_count, 0)} 个</span>
-                  <span>预测 {formatNumber(analyst.prediction_count, 0)} 条</span>
-                </div>
               </article>
             ))}
-            {!analysts.length && <div className="empty">暂无分析师。</div>}
+            {!topAnalysts.length && <div className="empty">暂无分析师。</div>}
           </div>
         </div>
 
@@ -1313,22 +1368,19 @@ export function App() {
             </div>
             <Bot />
           </div>
-          <div className="run-list">
-            {agentRuns.map((run) => (
-              <article className="run-card" key={run.id}>
-                <div className="run-head">
-                  <strong>{decisionText(run.decision)}</strong>
-                  <span>{formatDate(run.created_at)}</span>
-                </div>
-                <p>{run.market_summary}</p>
-                <p>{run.opinion_summary}</p>
-                <em>{run.output?.trade_event || run.risk}</em>
-                <button className="ghost-button tiny" type="button" onClick={() => loadAgentReplay(run.id)} disabled={loading}>节点回放</button>
-              </article>
-            ))}
-            {!agentRuns.length && <div className="empty">暂无 Agent 运行记录。</div>}
-          </div>
+          {agentRunList}
         </div>
+      </section>
+
+      <section className={activeView === 'agent' ? 'panel' : 'hidden'}>
+        <div className="panel-title compact">
+          <div>
+            <h2>Agent 运行记录</h2>
+            <p>每次决策保留输入摘要、输出和交易行为。</p>
+          </div>
+          <Bot />
+        </div>
+        {agentRunList}
       </section>
 
       <section className={activeView === 'agent' ? 'two-columns' : 'hidden'}>

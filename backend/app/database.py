@@ -18,6 +18,7 @@ DB_PATH = DATA_DIR / "bit_agent.sqlite3"
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_FUNDING_RATE_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
+GATEIO_SPOT_CANDLESTICKS_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
 
 try:
     from dotenv import load_dotenv
@@ -848,6 +849,52 @@ def fetch_binance_klines_for_days(symbol: str = "BTCUSDT", interval: str = "1h",
     return [deduped[key] for key in sorted(deduped)]
 
 
+def interval_seconds(interval: str) -> int:
+    unit = interval[-1]
+    value = int(interval[:-1])
+    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if unit not in multipliers:
+        raise ValueError(f"unsupported interval: {interval}")
+    return value * multipliers[unit]
+
+
+def fetch_gateio_klines_for_days(symbol: str = "BTCUSDT", interval: str = "1h", days: int = 30) -> list[list[Any]]:
+    if days < 1:
+        raise ValueError("days must be greater than 0")
+    pair = symbol.upper().replace("USDT", "_USDT")
+    step = interval_seconds(interval)
+    end = int(datetime.now(timezone.utc).timestamp())
+    start = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    start = max(start, end - step * 9000)
+    deduped: dict[int, list[Any]] = {}
+    current = start
+    while current < end:
+        chunk_end = min(end, current + step * 900)
+        query = urllib.parse.urlencode({"currency_pair": pair, "interval": interval, "from": current, "to": chunk_end})
+        request = urllib.request.Request(
+            f"{GATEIO_SPOT_CANDLESTICKS_URL}?{query}",
+            headers={"User-Agent": "btc-agent-mvp/0.1"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if not isinstance(data, list):
+            raise RuntimeError("unexpected Gate.io candlestick response")
+        for item in data:
+            if not isinstance(item, list) or len(item) < 6:
+                continue
+            open_time_ms = int(item[0]) * 1000
+            deduped[open_time_ms] = [
+                open_time_ms,
+                item[5],
+                item[3],
+                item[4],
+                item[2],
+                item[6] if len(item) > 6 else item[1],
+            ]
+        current = chunk_end
+    return [deduped[key] for key in sorted(deduped)]
+
+
 def fetch_latest_binance_funding_rate(symbol: str = "BTCUSDT") -> float:
     query = urllib.parse.urlencode({"symbol": symbol.upper(), "limit": 1})
     request = urllib.request.Request(
@@ -870,13 +917,10 @@ def sync_real_market_data(
     market_type: str = "spot",
     days: int | None = None,
 ) -> dict[str, Any]:
-    klines = fetch_binance_klines_for_days(symbol, interval, days, market_type=market_type) if days is not None else fetch_binance_klines(symbol, interval, limit, market_type=market_type)
+    klines = fetch_gateio_klines_for_days(symbol, interval, days or 1)
+    if days is None:
+        klines = klines[-limit:]
     funding_rate = 0.0
-    if market_type == "perpetual":
-        try:
-            funding_rate = fetch_latest_binance_funding_rate(symbol)
-        except Exception:
-            funding_rate = 0.0
     if replace:
         conn.execute(
             """
