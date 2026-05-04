@@ -132,6 +132,12 @@ button:disabled {
   background: rgba(15, 23, 42, 0.7);
 }
 
+.ghost-button.danger {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.36);
+  background: rgba(127, 29, 29, 0.28);
+}
+
 .tiny {
   min-height: 30px;
   padding: 0 10px;
@@ -146,6 +152,19 @@ button:disabled {
   gap: 8px;
 }
 
+.prediction-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(48px, 1fr));
+  gap: 6px;
+  width: 112px;
+}
+
+.prediction-actions .tiny {
+  min-height: 28px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
 .full {
   width: 100%;
 }
@@ -157,6 +176,50 @@ button:disabled {
   border-radius: 16px;
   color: #dff8ff;
   background: rgba(8, 145, 178, 0.16);
+}
+
+.quick-review-popover {
+  position: fixed;
+  top: 22px;
+  right: 22px;
+  z-index: 70;
+  display: grid;
+  gap: 12px;
+  width: min(460px, calc(100vw - 32px));
+  padding: 18px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 22px;
+  background: rgba(15, 23, 42, 0.94);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(18px);
+}
+
+.quick-review-popover strong {
+  color: #f8fafc;
+}
+
+.quick-review-popover p {
+  margin: 4px 0 0;
+  color: #fcd34d;
+  font-size: 13px;
+}
+
+.quick-review-popover pre {
+  max-height: 220px;
+}
+
+.quick-review-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.quick-review-summary span {
+  padding: 9px 10px;
+  border-radius: 12px;
+  color: #dbeafe;
+  font-size: 12px;
+  background: rgba(2, 6, 23, 0.48);
 }
 
 .view-tabs {
@@ -553,39 +616,51 @@ pre {
   gap: 14px;
 }
 
-.opinion-form label {
+.opinion-form label,
+.manual-edit-form label {
   display: grid;
   gap: 8px;
   color: #cbd5e1;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
 }
 
 .opinion-form input,
-.opinion-form textarea {
+.opinion-form textarea,
+.manual-edit-form input,
+.manual-edit-form textarea {
   width: 100%;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 16px;
-  outline: none;
+  color: #e2e8f0;
   color: #f8fafc;
   background: rgba(2, 6, 23, 0.42);
 }
 
-.opinion-form input {
+.opinion-form input,
+.manual-edit-form input {
   height: 44px;
   padding: 0 14px;
 }
 
-.opinion-form textarea {
+.opinion-form textarea,
+.manual-edit-form textarea {
   min-height: 154px;
   padding: 14px;
   resize: vertical;
 }
 
 .opinion-form input:focus,
-.opinion-form textarea:focus {
+.opinion-form textarea:focus,
+.manual-edit-form input:focus,
+.manual-edit-form textarea:focus {
   border-color: rgba(103, 232, 249, 0.7);
   box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.1);
+}
+
+.manual-edit-form {
+  display: grid;
+  gap: 14px;
 }
 
 .table-wrap {
@@ -610,6 +685,11 @@ th {
   color: #93c5fd;
   font-size: 13px;
   font-weight: 900;
+}
+
+th:last-child,
+td:last-child {
+  width: 136px;
 }
 
 td {

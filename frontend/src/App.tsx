@@ -241,6 +241,16 @@ type Prediction = {
   latest_change_reason?: string | null;
 };
 
+type PredictionEditForm = {
+  direction: string;
+  horizon: string;
+  target_price: string;
+  verification_time: string;
+  status: string;
+  confidence: string;
+  summary: string;
+};
+
 type Trade = {
   id: number;
   prediction_id?: number | null;
@@ -356,6 +366,7 @@ type OpinionResponse = {
   predictions: Prediction[];
   agent_run: AgentRun | null;
   needs_user_confirmation?: boolean;
+  review_item_id?: number;
 };
 
 type PredictionVersion = {
@@ -441,6 +452,14 @@ function formatDate(value?: string): string {
     hour: '2-digit',
     minute: '2-digit'
   }).format(new Date(value));
+}
+
+function toDatetimeLocalValue(value?: string): string {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const timezoneOffsetMs = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(date.getTime() - timezoneOffsetMs).toISOString().slice(0, 16);
 }
 
 function directionText(value: string): string {
@@ -566,7 +585,10 @@ export function App() {
   const [selectedAnalystCurve, setSelectedAnalystCurve] = useState<EquityCurvePoint[]>([]);
   const [selectedAnalystTrades, setSelectedAnalystTrades] = useState<Trade[]>([]);
   const [selectedReview, setSelectedReview] = useState<HumanReview | null>(null);
+  const [immediateReview, setImmediateReview] = useState<HumanReview | null>(null);
   const [selectedVerification, setSelectedVerification] = useState<VerificationResult | null>(null);
+  const [editingPrediction, setEditingPrediction] = useState<Prediction | null>(null);
+  const [predictionEditForm, setPredictionEditForm] = useState<PredictionEditForm | null>(null);
   const [predictionReplay, setPredictionReplay] = useState<PredictionReplay | null>(null);
   const [agentReplay, setAgentReplay] = useState<AgentRunReplay | null>(null);
   const [analystName, setAnalystName] = useState('');
@@ -735,6 +757,10 @@ export function App() {
       setContent('');
       setSourceUrl('');
       await loadAll();
+      if (result.needs_user_confirmation && result.review_item_id) {
+        const review = await requestJson<HumanReview>(`/api/reviews/${result.review_item_id}`);
+        setImmediateReview(review);
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '提交失败');
       appendStreamEvent({ id: Date.now() + 2, type: 'error', message: error instanceof Error ? error.message : '提交失败', created_at: new Date().toISOString() });
@@ -819,6 +845,7 @@ export function App() {
       });
       setMessage(`已确认人工复核，生成 ${result.predictions.length} 条预测`);
       setSelectedReview(null);
+      setImmediateReview((current) => current?.id === review.id ? null : current);
       await loadAll();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '确认失败');
@@ -836,6 +863,7 @@ export function App() {
       });
       setMessage('已拒绝人工复核项');
       setSelectedReview(null);
+      setImmediateReview((current) => current?.id === review.id ? null : current);
       await loadAll();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '拒绝失败');
@@ -851,6 +879,67 @@ export function App() {
       setSelectedVerification(result);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '加载验证详情失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startEditPrediction = (prediction: Prediction) => {
+    setEditingPrediction(prediction);
+    setPredictionEditForm({
+      direction: prediction.direction,
+      horizon: prediction.horizon,
+      target_price: prediction.target_price === null || prediction.target_price === undefined ? '' : String(prediction.target_price),
+      verification_time: toDatetimeLocalValue(prediction.verification_time),
+      status: prediction.status,
+      confidence: prediction.confidence || 'medium',
+      summary: prediction.summary || ''
+    });
+  };
+
+  const submitPredictionEdit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!editingPrediction || !predictionEditForm) return;
+    setLoading(true);
+    try {
+      await requestJson<Prediction>(`/api/predictions/${editingPrediction.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          direction: predictionEditForm.direction,
+          horizon: predictionEditForm.horizon,
+          target_price: predictionEditForm.target_price.trim() ? Number(predictionEditForm.target_price) : null,
+          verification_time: predictionEditForm.verification_time ? new Date(predictionEditForm.verification_time).toISOString() : null,
+          status: predictionEditForm.status,
+          confidence: predictionEditForm.confidence,
+          summary: predictionEditForm.summary
+        })
+      });
+      setMessage(`已人工修正预测 #${editingPrediction.id}`);
+      setEditingPrediction(null);
+      setPredictionEditForm(null);
+      await loadAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '修正预测失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const deletePrediction = async (prediction: Prediction) => {
+    if (!window.confirm(`确认删除预测 #${prediction.id}？关联验证结果和报告会一并删除。`)) return;
+    setLoading(true);
+    try {
+      await requestJson<{ deleted: boolean }>(`/api/predictions/${prediction.id}`, { method: 'DELETE' });
+      setMessage(`已删除预测 #${prediction.id}`);
+      if (selectedVerification?.prediction_id === prediction.id) setSelectedVerification(null);
+      if (predictionReplay?.prediction?.id === prediction.id) setPredictionReplay(null);
+      if (editingPrediction?.id === prediction.id) {
+        setEditingPrediction(null);
+        setPredictionEditForm(null);
+      }
+      await loadAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '删除预测失败');
     } finally {
       setLoading(false);
     }
@@ -998,6 +1087,29 @@ export function App() {
       </header>
 
       {message && <div className="message">{message}</div>}
+
+      {immediateReview && (
+        <section className="quick-review-popover">
+          <div className="run-head">
+            <div>
+              <strong>需要人工确认</strong>
+              <p>{immediateReview.suggested_question || '请确认该观点解析结果。'}</p>
+            </div>
+            <span>#{immediateReview.id}</span>
+          </div>
+          <div className="quick-review-summary">
+            <span>分析师：{immediateReview.draft_meta?.analyst_name || '未命名分析师'}</span>
+            <span>预测数：{formatNumber(immediateReview.draft?.parsed_predictions?.length || 0, 0)} 条</span>
+          </div>
+          <pre>{JSON.stringify(immediateReview.draft?.parsed_predictions || immediateReview.data || {}, null, 2)}</pre>
+          <div className="inline-actions">
+            <button className="primary-button tiny" type="button" onClick={() => confirmReview(immediateReview)} disabled={loading}>确认入库</button>
+            <button className="ghost-button tiny" type="button" onClick={() => setImmediateReview(null)}>稍后处理</button>
+            <button className="ghost-button tiny danger" type="button" onClick={() => rejectReview(immediateReview)} disabled={loading}>拒绝</button>
+            <button className="ghost-button tiny" type="button" onClick={() => { setSelectedReview(immediateReview); setImmediateReview(null); }}>详情</button>
+          </div>
+        </section>
+      )}
 
       <nav className="view-tabs">
         {APP_VIEWS.map((view) => (
@@ -1326,9 +1438,11 @@ export function App() {
                   <td>{formatDate(prediction.verification_time)}</td>
                   <td>{prediction.summary}</td>
                   <td>
-                    <div className="inline-actions">
+                    <div className="prediction-actions">
                       <button className="ghost-button tiny" type="button" onClick={() => loadPredictionVerification(prediction.id)} disabled={loading}>验证</button>
                       <button className="ghost-button tiny" type="button" onClick={() => loadPredictionReplay(prediction.id)} disabled={loading}>回放</button>
+                      <button className="ghost-button tiny" type="button" onClick={() => startEditPrediction(prediction)} disabled={loading}>修正</button>
+                      <button className="ghost-button tiny danger" type="button" onClick={() => deletePrediction(prediction)} disabled={loading}>删除</button>
                     </div>
                   </td>
                 </tr>
@@ -1520,6 +1634,72 @@ export function App() {
               <pre>{JSON.stringify(selectedReview.draft || selectedReview.data || {}, null, 2)}</pre>
             </div>
           </div>
+        </section>
+      )}
+
+      {editingPrediction && predictionEditForm && (
+        <section className="panel detail-panel">
+          <div className="panel-title compact">
+            <div>
+              <h2>人工修正预测 #{editingPrediction.id}</h2>
+              <p>{editingPrediction.analyst_name} · 修改后会标记为人工修正，并重新计算分析师评分。</p>
+            </div>
+            <button className="ghost-button" type="button" onClick={() => { setEditingPrediction(null); setPredictionEditForm(null); }}>关闭</button>
+          </div>
+          <form className="manual-edit-form" onSubmit={submitPredictionEdit}>
+            <div className="detail-grid">
+              <label>
+                方向
+                <select value={predictionEditForm.direction} onChange={(event) => setPredictionEditForm({ ...predictionEditForm, direction: event.target.value })}>
+                  <option value="bullish">看涨</option>
+                  <option value="bearish">看跌</option>
+                  <option value="sideways">震荡</option>
+                </select>
+              </label>
+              <label>
+                周期
+                <select value={predictionEditForm.horizon} onChange={(event) => setPredictionEditForm({ ...predictionEditForm, horizon: event.target.value })}>
+                  <option value="intraday">日内</option>
+                  <option value="short">短期</option>
+                  <option value="medium">中期</option>
+                  <option value="long">长期</option>
+                </select>
+              </label>
+              <label>
+                目标价
+                <input type="number" step="0.01" value={predictionEditForm.target_price} onChange={(event) => setPredictionEditForm({ ...predictionEditForm, target_price: event.target.value })} />
+              </label>
+              <label>
+                验证时间
+                <input type="datetime-local" value={predictionEditForm.verification_time} onChange={(event) => setPredictionEditForm({ ...predictionEditForm, verification_time: event.target.value })} />
+              </label>
+              <label>
+                状态
+                <select value={predictionEditForm.status} onChange={(event) => setPredictionEditForm({ ...predictionEditForm, status: event.target.value })}>
+                  <option value="pending">待验证</option>
+                  <option value="success">成功</option>
+                  <option value="failed">失败</option>
+                  <option value="modified">已改口</option>
+                </select>
+              </label>
+              <label>
+                置信度
+                <select value={predictionEditForm.confidence} onChange={(event) => setPredictionEditForm({ ...predictionEditForm, confidence: event.target.value })}>
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              摘要
+              <textarea value={predictionEditForm.summary} onChange={(event) => setPredictionEditForm({ ...predictionEditForm, summary: event.target.value })} />
+            </label>
+            <div className="inline-actions">
+              <button className="primary-button" type="submit" disabled={loading}>保存修正</button>
+              <button className="ghost-button" type="button" onClick={() => { setEditingPrediction(null); setPredictionEditForm(null); }}>取消</button>
+            </div>
+          </form>
         </section>
       )}
 

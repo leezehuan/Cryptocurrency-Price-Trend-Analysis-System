@@ -5,7 +5,7 @@ import json
 import sqlite3
 from collections.abc import Generator
 
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -13,13 +13,14 @@ from .config_loader import load_runtime_config
 from .database import clear_demo_data, connect, init_db, sync_market_history, sync_market_intervals, sync_real_market_data
 from .llm_client import test_model_connection
 from .scheduler import scheduler_status, start_scheduler, stop_scheduler
-from .schemas import AgentRunCreate, MarketHistorySyncCreate, MarketIntervalsSyncCreate, OpinionCreate, ReviewConfirmCreate, ReviewRejectCreate, SettingUpdate
+from .schemas import AgentRunCreate, MarketHistorySyncCreate, MarketIntervalsSyncCreate, OpinionCreate, PredictionManualUpdate, ReviewConfirmCreate, ReviewRejectCreate, SettingUpdate
 from .services import (
     account_equity_curve,
     account_summary,
     confirm_human_review,
     create_opinion,
     create_daily_report,
+    delete_prediction_manual,
     dashboard,
     get_agent_run_replay,
     get_analyst_replay,
@@ -50,6 +51,7 @@ from .services import (
     run_agent,
     run_scheduled_task,
     update_setting,
+    update_prediction_manual,
     verify_due_predictions,
 )
 
@@ -297,6 +299,26 @@ def get_predictions(
 @app.get("/api/predictions/{prediction_id}/replay")
 def get_prediction_replay_view(prediction_id: int, db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
     return get_prediction_replay(db, prediction_id)
+
+
+@app.put("/api/predictions/{prediction_id}")
+def put_prediction_manual(
+    prediction_id: int,
+    payload: PredictionManualUpdate,
+    db: sqlite3.Connection = Depends(get_db),
+) -> dict[str, object]:
+    try:
+        return update_prediction_manual(db, prediction_id, payload.dict(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/predictions/{prediction_id}")
+def delete_prediction(prediction_id: int, db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    try:
+        return delete_prediction_manual(db, prediction_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/api/predictions/verify-due")

@@ -29,6 +29,16 @@ class SettingUpdate(BaseModel):
     value: object
 
 
+class PredictionManualUpdate(BaseModel):
+    direction: str | None = None
+    target_price: float | None = None
+    horizon: str | None = None
+    verification_time: str | None = None
+    status: str | None = None
+    confidence: str | None = None
+    summary: str | None = Field(default=None, max_length=1200)
+
+
 class MarketIntervalsSyncCreate(BaseModel):
     intervals: list[str] = Field(default_factory=lambda: ["1h", "4h", "1d"])
     symbol: str = "BTCUSDT"

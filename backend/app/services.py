@@ -931,6 +931,119 @@ def list_predictions(conn: sqlite3.Connection, status: str | None = None, limit:
     return rows_to_dicts(rows)
 
 
+def get_prediction_item(conn: sqlite3.Connection, prediction_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            p.*,
+            a.name AS analyst_name,
+            vr.final_score AS latest_final_score,
+            vr.quality_label AS latest_quality_label,
+            vr.direction_score AS latest_direction_score,
+            vr.target_score AS latest_target_score,
+            vr.target_distance_pct AS latest_target_distance_pct,
+            vr.price_change_pct AS latest_price_change_pct,
+            pv.change_type AS latest_change_type,
+            pv.change_severity AS latest_change_severity,
+            pv.reason AS latest_change_reason
+        FROM predictions p
+        JOIN analysts a ON a.id = p.analyst_id
+        LEFT JOIN verification_results vr ON vr.id = (
+            SELECT MAX(vr2.id)
+            FROM verification_results vr2
+            WHERE vr2.prediction_id = p.id
+        )
+        LEFT JOIN prediction_versions pv ON pv.id = (
+            SELECT MAX(pv2.id)
+            FROM prediction_versions pv2
+            WHERE pv2.prediction_id = p.id OR pv2.new_prediction_id = p.id
+        )
+        WHERE p.id = ?
+        """,
+        (prediction_id,),
+    ).fetchone()
+    return row_to_dict(row) or {}
+
+
+def update_prediction_manual(conn: sqlite3.Connection, prediction_id: int, values: dict[str, Any]) -> dict[str, Any]:
+    current = row_to_dict(conn.execute("SELECT * FROM predictions WHERE id = ?", (prediction_id,)).fetchone()) or {}
+    if not current:
+        raise ValueError("prediction not found")
+    allowed = {
+        "direction": {"bullish", "bearish", "sideways"},
+        "horizon": {"intraday", "short", "medium", "long"},
+        "status": {"pending", "success", "failed", "modified"},
+        "confidence": {"low", "medium", "high"},
+    }
+    updates: dict[str, Any] = {}
+    for key in ("direction", "horizon", "status", "confidence"):
+        if key in values and values[key] is not None:
+            value = str(values[key]).strip()
+            if value not in allowed[key]:
+                raise ValueError(f"invalid {key}: {value}")
+            updates[key] = value
+    if "target_price" in values:
+        target_price = values["target_price"]
+        updates["target_price"] = float(target_price) if target_price not in (None, "") else None
+    if values.get("verification_time") is not None:
+        updates["verification_time"] = parse_dt(str(values["verification_time"])).isoformat()
+    if values.get("summary") is not None:
+        summary = str(values["summary"]).strip()
+        if not summary:
+            raise ValueError("summary cannot be empty")
+        updates["summary"] = summary
+    if not updates:
+        return get_prediction_item(conn, prediction_id)
+    updates["is_modified"] = 1
+    updates["updated_at"] = utc_now()
+    set_clause = ", ".join(f"{key} = ?" for key in updates)
+    conn.execute(f"UPDATE predictions SET {set_clause} WHERE id = ?", [*updates.values(), prediction_id])
+    conn.execute(
+        """
+        INSERT INTO prediction_versions (
+            prediction_id, old_direction, old_target_price, old_horizon, old_confidence,
+            new_prediction_id, new_direction, new_target_price, new_horizon, new_confidence,
+            change_type, change_severity, reason, payload, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            prediction_id,
+            current.get("direction"),
+            current.get("target_price"),
+            current.get("horizon"),
+            current.get("confidence"),
+            prediction_id,
+            updates.get("direction", current.get("direction")),
+            updates.get("target_price", current.get("target_price")),
+            updates.get("horizon", current.get("horizon")),
+            updates.get("confidence", current.get("confidence")),
+            "manual_correction",
+            0.5,
+            "人工修正预测",
+            json.dumps({"before": current, "updates": updates}, ensure_ascii=False, default=str),
+            utc_now(),
+        ),
+    )
+    recompute_analyst_metrics(conn, int(current["analyst_id"]))
+    conn.commit()
+    return get_prediction_item(conn, prediction_id)
+
+
+def delete_prediction_manual(conn: sqlite3.Connection, prediction_id: int) -> dict[str, Any]:
+    current = row_to_dict(conn.execute("SELECT * FROM predictions WHERE id = ?", (prediction_id,)).fetchone()) or {}
+    if not current:
+        raise ValueError("prediction not found")
+    analyst_id = int(current["analyst_id"])
+    conn.execute("UPDATE virtual_trades SET prediction_id = NULL WHERE prediction_id = ?", (prediction_id,))
+    conn.execute("DELETE FROM verification_reports WHERE prediction_id = ?", (prediction_id,))
+    conn.execute("DELETE FROM verification_results WHERE prediction_id = ?", (prediction_id,))
+    conn.execute("DELETE FROM prediction_versions WHERE prediction_id = ? OR new_prediction_id = ?", (prediction_id, prediction_id))
+    conn.execute("DELETE FROM predictions WHERE id = ?", (prediction_id,))
+    recompute_analyst_metrics(conn, analyst_id)
+    conn.commit()
+    return {"deleted": True, "prediction_id": prediction_id}
+
+
 def list_analysts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
