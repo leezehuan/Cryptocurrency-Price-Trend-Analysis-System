@@ -994,7 +994,6 @@ def update_prediction_manual(conn: sqlite3.Connection, prediction_id: int, value
         updates["summary"] = summary
     if not updates:
         return get_prediction_item(conn, prediction_id)
-    updates["is_modified"] = 1
     updates["updated_at"] = utc_now()
     set_clause = ", ".join(f"{key} = ?" for key in updates)
     conn.execute(f"UPDATE predictions SET {set_clause} WHERE id = ?", [*updates.values(), prediction_id])
@@ -1605,6 +1604,7 @@ def recent_prediction_changes_for_report(conn: sqlite3.Connection, limit: int = 
         FROM prediction_versions pv
         JOIN predictions p ON p.id = pv.prediction_id
         JOIN analysts a ON a.id = p.analyst_id
+        WHERE pv.change_type != 'manual_correction'
         ORDER BY pv.created_at DESC
         LIMIT ?
         """,
@@ -2164,7 +2164,17 @@ def verify_prediction(conn: sqlite3.Connection, prediction: dict[str, Any]) -> d
         target_score = 1.0 if target_hit else 0.2
     verification_time = parse_dt(prediction["verification_time"])
     time_score = 1.0 if verification_time <= parse_dt(utc_now()) else 0.0
-    modified_penalty = 0.2 if prediction.get("is_modified") else 0.0
+    counted_change = conn.execute(
+        """
+        SELECT id
+        FROM prediction_versions
+        WHERE prediction_id = ?
+          AND change_type != 'manual_correction'
+        LIMIT 1
+        """,
+        (prediction["id"],),
+    ).fetchone()
+    modified_penalty = 0.2 if counted_change else 0.0
     score = max(0.0, direction_score * 0.45 + target_score * 0.4 + time_score * 0.15 - modified_penalty)
     success = score >= 0.6
     status = "success" if success else "failed"
@@ -2258,10 +2268,11 @@ def recompute_analyst_metrics(conn: sqlite3.Connection, analyst_id: int) -> None
     predictions_stats = conn.execute(
         """
         SELECT
-            COUNT(*) AS prediction_count,
-            COUNT(CASE WHEN status = 'modified' OR is_modified = 1 THEN 1 END) AS modified
-        FROM predictions
-        WHERE analyst_id = ?
+            COUNT(DISTINCT p.id) AS prediction_count,
+            COUNT(DISTINCT CASE WHEN pv.change_type != 'manual_correction' THEN pv.prediction_id END) AS modified
+        FROM predictions p
+        LEFT JOIN prediction_versions pv ON pv.prediction_id = p.id
+        WHERE p.analyst_id = ?
         """,
         (analyst_id,),
     ).fetchone()
