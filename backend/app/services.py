@@ -1219,7 +1219,7 @@ def account_state_for_analyst(
     ).fetchone()["fee"]
     realized_pnl = float(closed["realized_pnl"] or 0)
     wallet_balance = initial_balance + realized_pnl - float(open_fee or 0)
-    open_trades = current_open_trades_for_account(conn, analyst_id)
+    open_trades = current_open_trades_for_account(conn, analyst_id, account_type)
     open_positions: list[dict[str, Any]] = []
     unrealized_pnl = 0.0
     open_funding_fee = 0.0
