@@ -165,6 +165,26 @@ button:disabled {
   white-space: nowrap;
 }
 
+.prediction-status {
+  display: grid;
+  gap: 5px;
+}
+
+.prediction-status em {
+  color: #7dd3fc;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.prediction-group-row td {
+  padding: 12px;
+  background: rgba(15, 23, 42, 0.4);
+}
+
+.verified-prediction-row {
+  opacity: 0.72;
+}
+
 .full {
   width: 100%;
 }
@@ -176,6 +196,79 @@ button:disabled {
   border-radius: 16px;
   color: #dff8ff;
   background: rgba(8, 145, 178, 0.16);
+}
+
+.project-notice-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(14px);
+}
+
+.project-notice-modal {
+  display: grid;
+  gap: 22px;
+  width: min(560px, 100%);
+  padding: 28px;
+  border: 1px solid rgba(125, 211, 252, 0.34);
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at top left, rgba(34, 211, 238, 0.16), transparent 18rem),
+    rgba(15, 23, 42, 0.96);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.55);
+}
+
+.project-notice-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.project-notice-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 18px;
+  color: #67e8f9;
+  background: rgba(8, 145, 178, 0.24);
+}
+
+.project-notice-header h2 {
+  margin: 0 0 8px;
+  color: #f8fafc;
+  font-size: 26px;
+}
+
+.project-notice-header p {
+  margin: 0;
+  color: #cbd5e1;
+  line-height: 1.7;
+}
+
+.project-notice-points {
+  display: grid;
+  gap: 10px;
+}
+
+.project-notice-points span {
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 16px;
+  color: #dbeafe;
+  line-height: 1.65;
+  background: rgba(2, 6, 23, 0.34);
+}
+
+.project-notice-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .quick-review-popover {

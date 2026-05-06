@@ -249,6 +249,8 @@ type Prediction = {
   latest_change_type?: string | null;
   latest_change_severity?: number | null;
   latest_change_reason?: string | null;
+  latest_old_target_price?: number | null;
+  latest_new_target_price?: number | null;
 };
 
 // 前端编辑预测时使用的表单状态。
@@ -378,9 +380,16 @@ type Dashboard = {
 
 type OpinionResponse = {
   predictions: Prediction[];
-  agent_run: AgentRun | null;
+  agent_run?: AgentRun | null;
   needs_user_confirmation?: boolean;
-  review_item_id?: number;
+  review_item_id?: number | null;
+};
+
+type TargetChangeRecord = {
+  latest_old_target_price?: number | null;
+  latest_new_target_price?: number | null;
+  old_target_price?: number | null;
+  new_target_price?: number | null;
 };
 
 type PredictionVersion = {
@@ -525,10 +534,27 @@ function reportScenarios(value?: ReportScenario[] | Record<string, ReportScenari
   return Array.isArray(value) ? value : Object.values(value);
 }
 
-function changeTypeText(value?: string): string {
+function isVerifiedPrediction(prediction: Prediction): boolean {
+  return ['success', 'failed'].includes(prediction.status);
+}
+
+function predictionTimeValue(prediction: Prediction): number {
+  const value = new Date(prediction.verification_time).getTime();
+  return Number.isNaN(value) ? Number.MAX_SAFE_INTEGER : value;
+}
+
+function changeTypeText(value?: string | null, record?: TargetChangeRecord): string {
+  if (value === 'target_price_added_or_removed' && record) {
+    const oldTarget = record.latest_old_target_price !== undefined ? record.latest_old_target_price : record.old_target_price;
+    const newTarget = record.latest_new_target_price !== undefined ? record.latest_new_target_price : record.new_target_price;
+    if (oldTarget == null && newTarget != null) return '目标价新增';
+    if (oldTarget != null && newTarget == null) return '目标价移除';
+  }
   return {
     direction_reversal: '方向反转',
     target_price_shift: '目标价大幅变化',
+    target_price_added: '目标价新增',
+    target_price_removed: '目标价移除',
     target_price_added_or_removed: '目标价新增/移除',
     horizon_shift: '周期变化',
     confidence_shift: '置信度变化',
@@ -618,9 +644,11 @@ export function App() {
   const [sourceUrl, setSourceUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [showProjectNotice, setShowProjectNotice] = useState(true);
   const [streamEvents, setStreamEvents] = useState<AgentStreamEvent[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
   const [debugPanelCollapsed, setDebugPanelCollapsed] = useState(true);
+  const [verifiedPredictionsExpanded, setVerifiedPredictionsExpanded] = useState(false);
 
   const appendStreamEvent = (event: AgentStreamEvent) => {
     // 追加 SSE 事件并按 id 去重，只保留最近 80 条用于调试面板展示。
@@ -709,6 +737,7 @@ export function App() {
       setMarketRows(marketData);
       setAnalysts(analystData);
       setPredictions(predictionData);
+      setVerifiedPredictionsExpanded(false);
       setTrades(tradeData);
       setAgentRuns(runData);
       setReviews(reviewData);
@@ -1059,6 +1088,10 @@ export function App() {
   const riskLevel = marginUsage >= 50 || Math.abs(accountSummary?.drawdown || 0) >= 20 ? '高' : marginUsage >= 25 || Math.abs(accountSummary?.drawdown || 0) >= 10 ? '中' : '低';
   const displayPrice = livePrice?.price || market?.latest_price;
   const liveSourceText = livePrice?.source === 'db_fallback' ? '数据库备用价' : livePrice?.source === 'unavailable' ? '实时源不可用' : livePrice?.source ? 'Binance 实时价' : '等待实时价格';
+  const sortedPredictions = [...predictions].sort((left, right) => predictionTimeValue(left) - predictionTimeValue(right) || left.id - right.id);
+  const pendingPredictions = sortedPredictions.filter((prediction) => !isVerifiedPrediction(prediction));
+  const verifiedPredictions = sortedPredictions.filter(isVerifiedPrediction);
+  const visibleVerifiedPredictions = verifiedPredictionsExpanded ? verifiedPredictions : [];
   const rankedAnalysts = [...analysts].sort((left, right) => Number(right.total_score || 0) - Number(left.total_score || 0));
   const topAnalysts = rankedAnalysts.slice(0, 8);
   const analystDetailCards = (
@@ -1130,6 +1163,27 @@ export function App() {
       </header>
 
       {message && <div className="message">{message}</div>}
+
+      {showProjectNotice && (
+        <section className="project-notice-backdrop" role="dialog" aria-modal="true" aria-labelledby="project-notice-title">
+          <div className="project-notice-modal">
+            <div className="project-notice-header">
+              <span className="project-notice-icon"><ShieldAlert size={24} /></span>
+              <div>
+                <h2 id="project-notice-title">项目说明</h2>
+                <p>本项目为实验项目，用于演示加密货币行情分析、观点追踪与智能体工作流。</p>
+              </div>
+            </div>
+            <div className="project-notice-points">
+              <span>由于国内加密货币行情信息较少，当前版本未加载相关信息爬虫。</span>
+              <span>系统仅添加了数条示例信息，用于展示页面、流程和功能效果。</span>
+            </div>
+            <div className="project-notice-actions">
+              <button className="primary-button" type="button" onClick={() => setShowProjectNotice(false)}>我知道了</button>
+            </div>
+          </div>
+        </section>
+      )}
 
       {immediateReview && (
         <section className="quick-review-popover">
@@ -1467,15 +1521,51 @@ export function App() {
               </tr>
             </thead>
             <tbody>
-              {predictions.map((prediction) => (
+              {pendingPredictions.map((prediction) => (
                 <tr key={prediction.id}>
                   <td>{prediction.analyst_name}</td>
                   <td><span className={`tag ${prediction.direction}`}>{directionText(prediction.direction)}</span></td>
                   <td>{horizonText(prediction.horizon)}</td>
                   <td>${formatNumber(prediction.target_price)}</td>
                   <td>
-                    {statusText(prediction.status)}
-                    {prediction.latest_change_type && <em> · {changeTypeText(prediction.latest_change_type)}</em>}
+                    <div className="prediction-status">
+                      <span>{statusText(prediction.status)}</span>
+                      {prediction.latest_change_type && <em>{changeTypeText(prediction.latest_change_type, prediction)}</em>}
+                    </div>
+                  </td>
+                  <td>{qualityText(prediction.latest_quality_label)} · {formatNumber(prediction.latest_final_score, 3)}</td>
+                  <td>{formatDate(prediction.verification_time)}</td>
+                  <td>{prediction.summary}</td>
+                  <td>
+                    <div className="prediction-actions">
+                      <button className="ghost-button tiny" type="button" onClick={() => loadPredictionVerification(prediction.id)} disabled={loading}>验证</button>
+                      <button className="ghost-button tiny" type="button" onClick={() => loadPredictionReplay(prediction.id)} disabled={loading}>回放</button>
+                      <button className="ghost-button tiny" type="button" onClick={() => startEditPrediction(prediction)} disabled={loading}>修正</button>
+                      <button className="ghost-button tiny danger" type="button" onClick={() => deletePrediction(prediction)} disabled={loading}>删除</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {verifiedPredictions.length > 0 && (
+                <tr className="prediction-group-row">
+                  <td colSpan={9}>
+                    <button className="ghost-button tiny" type="button" onClick={() => setVerifiedPredictionsExpanded((current) => !current)}>
+                      {verifiedPredictionsExpanded ? '收起已验证' : '展开已验证'} · {verifiedPredictions.length} 条
+                    </button>
+                  </td>
+                </tr>
+              )}
+              {visibleVerifiedPredictions.map((prediction) => (
+                <tr className="verified-prediction-row" key={prediction.id}>
+                  <td>{prediction.analyst_name}</td>
+                  <td><span className={`tag ${prediction.direction}`}>{directionText(prediction.direction)}</span></td>
+                  <td>{horizonText(prediction.horizon)}</td>
+                  <td>${formatNumber(prediction.target_price)}</td>
+                  <td>
+                    <div className="prediction-status">
+                      <span>{statusText(prediction.status)}</span>
+                      {prediction.latest_change_type && <em>{changeTypeText(prediction.latest_change_type, prediction)}</em>}
+                    </div>
                   </td>
                   <td>{qualityText(prediction.latest_quality_label)} · {formatNumber(prediction.latest_final_score, 3)}</td>
                   <td>{formatDate(prediction.verification_time)}</td>
