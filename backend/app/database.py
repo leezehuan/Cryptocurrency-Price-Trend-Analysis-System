@@ -11,10 +11,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+# 后端基础路径与默认 SQLite 数据文件位置。
 BASE_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = BASE_DIR.parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "bit_agent.sqlite3"
+
+# 外部行情数据源地址，分别用于现货、合约 K 线和资金费率。
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_FUNDING_RATE_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
@@ -26,15 +29,18 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 if load_dotenv is not None:
+    # 本地开发时自动加载项目根目录的 .env。
     load_dotenv(PROJECT_ROOT / ".env")
 
 try:
+    # psycopg 为可选依赖；配置 DATABASE_URL 后才会使用 PostgreSQL。
     import psycopg
     from psycopg.rows import dict_row
 except ImportError:  # pragma: no cover
     psycopg = None
     dict_row = None
 
+# 系统默认配置，初始化数据库和重置设置时会写入 settings 表。
 DEFAULT_SETTINGS: dict[str, tuple[Any, str, str]] = {
     "scheduler.enabled": (False, "bool", "是否启用后台定时任务"),
     "scheduler.market_sync_minutes": (60, "int", "行情同步间隔分钟数"),
@@ -62,6 +68,7 @@ DEFAULT_SETTINGS: dict[str, tuple[Any, str, str]] = {
     "scheduler.account_snapshot_minutes": (15, "int", "账户权益快照任务间隔分钟数"),
 }
 
+# PostgreSQL 包装层需要对这些表的 INSERT 自动追加 RETURNING id。
 ID_TABLES = {
     "analysts",
     "raw_opinions",
@@ -83,10 +90,12 @@ ID_TABLES = {
 
 
 def utc_now() -> str:
+    # 统一使用 UTC ISO 时间，避免前后端和调度器时区不一致。
     return datetime.now(timezone.utc).isoformat()
 
 
 def parse_dt(value: str | None) -> datetime:
+    # 将字符串时间解析为 UTC datetime，空值默认当前时间。
     if not value:
         return datetime.now(timezone.utc)
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -96,6 +105,7 @@ def parse_dt(value: str | None) -> datetime:
 
 
 class PostgresCursor:
+    # 让 PostgreSQL cursor 暴露与 sqlite cursor 类似的 fetch 和 lastrowid 接口。
     def __init__(self, cursor: Any, lastrowid: int | None = None) -> None:
         self.cursor = cursor
         self.lastrowid = lastrowid
@@ -108,6 +118,7 @@ class PostgresCursor:
 
 
 class PostgresConnection:
+    # 轻量包装 PostgreSQL 连接，使上层业务代码可复用 SQLite 风格 SQL。
     def __init__(self, conn: Any) -> None:
         self.conn = conn
 
@@ -154,23 +165,28 @@ class PostgresConnection:
 
 
 def database_url() -> str | None:
+    # 同时支持 DATABASE_URL 和 POSTGRES_DSN 两种环境变量。
     return os.getenv("DATABASE_URL") or os.getenv("POSTGRES_DSN")
 
 
 def database_backend() -> str:
+    # 根据是否配置 PostgreSQL DSN 判断当前数据库后端。
     return "postgres" if database_url() else "sqlite"
 
 
 def convert_placeholders(query: str) -> str:
+    # 将 SQLite 的 ? 占位符转换成 psycopg 使用的 %s。
     return re.sub(r"\?", "%s", query)
 
 
 def insert_target_table(query: str) -> str | None:
+    # 从 INSERT 语句中提取目标表名，用于判断是否需要返回自增 id。
     match = re.search(r"\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)", query, re.IGNORECASE)
     return match.group(1).lower() if match else None
 
 
 def append_returning_id(query: str) -> str:
+    # PostgreSQL 需要 RETURNING id 才能模拟 sqlite 的 lastrowid。
     stripped = query.strip()
     upper = stripped.upper()
     if not upper.startswith("INSERT") or "RETURNING" in upper:
@@ -182,6 +198,7 @@ def append_returning_id(query: str) -> str:
 
 
 def convert_sql_for_postgres(query: str, returning_id: bool = False) -> str:
+    # 将项目中常见的 SQLite 写法转换为 PostgreSQL 可执行 SQL。
     converted = query
     converted = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO\s+settings", "INSERT INTO settings", converted, flags=re.IGNORECASE)
     converted = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO\s+market_data", "INSERT INTO market_data", converted, flags=re.IGNORECASE)
@@ -198,6 +215,7 @@ def convert_sql_for_postgres(query: str, returning_id: bool = False) -> str:
 
 
 def convert_schema_for_postgres(script: str) -> str:
+    # 初始化表结构时转换少量 SQLite 专有类型。
     converted = script
     converted = converted.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
     converted = converted.replace("REAL", "DOUBLE PRECISION")
@@ -205,6 +223,7 @@ def convert_schema_for_postgres(script: str) -> str:
 
 
 def connect() -> Any:
+    # 优先连接 PostgreSQL；未配置时使用本地 SQLite 数据库。
     url = database_url()
     if url:
         if psycopg is None or dict_row is None:
@@ -218,16 +237,19 @@ def connect() -> Any:
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    # 将数据库行对象转换为普通字典，方便 JSON 序列化。
     if row is None:
         return None
     return {key: row[key] for key in row.keys()}
 
 
 def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    # 批量转换查询结果。
     return [row_to_dict(row) or {} for row in rows]
 
 
 def setting_value_to_text(value: Any, value_type: str) -> str:
+    # settings 表统一存储字符串，读取时再按 value_type 还原类型。
     if value_type == "json":
         return json.dumps(value, ensure_ascii=False)
     if value_type == "bool":
@@ -236,6 +258,7 @@ def setting_value_to_text(value: Any, value_type: str) -> str:
 
 
 def seed_default_settings(conn: sqlite3.Connection) -> None:
+    # 首次初始化或新增配置项时写入默认设置。
     for key, (value, value_type, description) in DEFAULT_SETTINGS.items():
         conn.execute(
             """
@@ -258,6 +281,7 @@ def seed_default_settings(conn: sqlite3.Connection) -> None:
 
 
 def migrate_market_data_unique_constraint(conn: sqlite3.Connection) -> None:
+    # 兼容旧版 SQLite 表结构，将 open_time 唯一约束升级为复合唯一约束。
     if database_backend() != "sqlite":
         return
     row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'market_data'").fetchone()
@@ -322,6 +346,7 @@ def migrate_market_data_unique_constraint(conn: sqlite3.Connection) -> None:
 
 
 def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    # 跨 SQLite/PostgreSQL 获取表字段集合，供增量迁移使用。
     if database_backend() == "postgres":
         rows = conn.execute(
             """
@@ -337,6 +362,7 @@ def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 
 
 def ensure_virtual_trade_columns(conn: sqlite3.Connection) -> None:
+    # 为历史数据库补齐虚拟交易账户字段。
     existing = table_columns(conn, "virtual_trades")
     columns: dict[str, str] = {
         "account_type": "TEXT NOT NULL DEFAULT 'analyst'",
@@ -359,6 +385,7 @@ def ensure_virtual_trade_columns(conn: sqlite3.Connection) -> None:
 
 
 def ensure_virtual_account_snapshot_columns(conn: sqlite3.Connection) -> None:
+    # 为账户快照表补齐交易员账户和账户类型字段。
     existing = table_columns(conn, "virtual_account_snapshots")
     columns: dict[str, str] = {
         "analyst_id": "INTEGER",
@@ -375,6 +402,7 @@ def ensure_virtual_account_snapshot_columns(conn: sqlite3.Connection) -> None:
 
 
 def ensure_analyst_metric_columns(conn: sqlite3.Connection) -> None:
+    # 为分析师评分体系补齐扩展指标字段。
     existing = table_columns(conn, "analysts")
     columns: dict[str, str] = {
         "hard_win_rate": "REAL NOT NULL DEFAULT 0",
@@ -395,6 +423,7 @@ def ensure_analyst_metric_columns(conn: sqlite3.Connection) -> None:
 
 
 def ensure_verification_result_columns(conn: sqlite3.Connection) -> None:
+    # 为预测验证结果补齐价格偏离和质量标签字段。
     existing = table_columns(conn, "verification_results")
     columns: dict[str, str] = {
         "price_change_pct": "REAL NOT NULL DEFAULT 0",
@@ -410,6 +439,7 @@ def ensure_verification_result_columns(conn: sqlite3.Connection) -> None:
 
 
 def ensure_prediction_version_columns(conn: sqlite3.Connection) -> None:
+    # 为观点改口记录补齐新旧方向、周期和严重度字段。
     existing = table_columns(conn, "prediction_versions")
     columns: dict[str, str] = {
         "old_horizon": "TEXT",
@@ -430,6 +460,7 @@ def ensure_prediction_version_columns(conn: sqlite3.Connection) -> None:
 
 
 def init_db() -> None:
+    # 创建所有业务表、索引，并执行必要的兼容迁移和种子数据写入。
     with connect() as conn:
         conn.executescript(
             """

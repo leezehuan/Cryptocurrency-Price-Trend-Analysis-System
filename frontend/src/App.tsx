@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Activity, Bot, BrainCircuit, CheckCircle2, Clock3, LineChart, RefreshCw, Send, ShieldAlert, TrendingDown, TrendingUp, WalletCards } from 'lucide-react';
 
+// 后端市场摘要接口返回的数据结构，用于顶部行情卡片和走势图。
 type MarketSummary = {
   latest_price: number;
   symbol?: string;
@@ -31,6 +32,7 @@ type LivePrice = {
   error?: string;
 };
 
+// 行情 K 线及技术指标行，用于市场表格和图表。
 type MarketRow = {
   id: number;
   open_time: string;
@@ -49,6 +51,7 @@ type MarketRow = {
   bb_lower?: number;
 };
 
+// Agent 单次运行摘要，用于运行历史和决策展示。
 type AgentRun = {
   id: number;
   trigger: string;
@@ -70,6 +73,7 @@ type AgentRun = {
   };
 };
 
+// SSE 实时流事件，用于展示 Agent 节点执行过程。
 type AgentStreamEvent = {
   id: number;
   agent_run_id?: number | null;
@@ -82,6 +86,7 @@ type AgentStreamEvent = {
   type?: string;
 };
 
+// 人工复核项结构，用于展示待确认的观点解析草稿。
 type HumanReview = {
   id: number;
   status: string;
@@ -100,6 +105,7 @@ type HumanReview = {
   };
 };
 
+// 预测验证结果结构，用于预测详情和验证列表。
 type VerificationResult = {
   id: number;
   prediction_id: number;
@@ -133,6 +139,7 @@ type VerificationReport = {
   data?: Record<string, unknown>;
 };
 
+// 系统设置项结构，对应后端 settings 表。
 type SettingItem = {
   key: string;
   value: string;
@@ -167,6 +174,7 @@ type ReportAccountSnapshot = {
   unrealized_pnl?: number | null;
 };
 
+// 每日报告结构，用于报告列表和详情展示。
 type AgentReport = {
   id: number;
   title: string;
@@ -189,6 +197,7 @@ type AgentReport = {
   };
 };
 
+// 分析师评分与账户摘要结构，用于排行榜和分析师详情。
 type Analyst = {
   id: number;
   name: string;
@@ -218,6 +227,7 @@ type Analyst = {
   open_position_count?: number;
 };
 
+// 单条预测记录结构，包含最新验证和改口信息。
 type Prediction = {
   id: number;
   analyst_name: string;
@@ -241,6 +251,7 @@ type Prediction = {
   latest_change_reason?: string | null;
 };
 
+// 前端编辑预测时使用的表单状态。
 type PredictionEditForm = {
   direction: string;
   horizon: string;
@@ -251,6 +262,7 @@ type PredictionEditForm = {
   summary: string;
 };
 
+// 虚拟合约交易记录结构。
 type Trade = {
   id: number;
   prediction_id?: number | null;
@@ -277,6 +289,7 @@ type Trade = {
   closed_at?: string | null;
 };
 
+// AI 聚合账户规则信号结构。
 type AiTradeSignal = {
   decision?: string;
   direction?: string;
@@ -304,6 +317,7 @@ type AiTradeSignal = {
   }[];
 };
 
+// 虚拟账户权益摘要结构，兼容 AI 聚合账户和分析师账户。
 type VirtualAccountSummary = {
   analyst_id?: number | null;
   analyst_name?: string | null;
@@ -415,8 +429,10 @@ type AgentRunReplay = {
   focus_predictions?: Prediction[];
 };
 
+// 前端视图枚举，对应顶部导航标签。
 type AppView = 'overview' | 'analysts' | 'accounts' | 'predictions' | 'agent' | 'settings';
 
+// 默认 API 前缀为 /bit，可通过 Vite 环境变量覆盖。
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/bit';
 const MARKET_INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'];
 const APP_VIEWS: { id: AppView; label: string; description: string }[] = [
@@ -429,6 +445,7 @@ const APP_VIEWS: { id: AppView; label: string; description: string }[] = [
 ];
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  // 统一封装 JSON 请求和错误处理，所有后端接口都通过这里调用。
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...init
@@ -440,6 +457,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function formatNumber(value?: number | null, digits = 2): string {
+  // 使用中文本地化数字格式展示价格、收益率和统计值。
   if (value === null || value === undefined || Number.isNaN(value)) return '-';
   return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value);
 }
@@ -455,6 +473,7 @@ function formatDate(value?: string): string {
 }
 
 function toDatetimeLocalValue(value?: string): string {
+  // 将 ISO 时间转换成 datetime-local 输入框需要的本地时间格式。
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
@@ -485,6 +504,7 @@ function qualityText(value?: string | null): string {
 }
 
 function settingValueText(value: unknown): string {
+  // 将不同类型的设置值转换成人类可读文本。
   if (value === true) return '是';
   if (value === false) return '否';
   if (Array.isArray(value)) return value.join('、');
@@ -529,6 +549,7 @@ function tradeSideText(value?: string): string {
 }
 
 function Sparkline({ values }: { values: number[] }) {
+  // 计算迷你走势图折线点位，自动按当前序列最大最小值缩放。
   const points = useMemo(() => {
     if (!values.length) return '';
     const min = Math.min(...values);
@@ -564,6 +585,7 @@ function MetricCard({ title, value, desc, icon }: { title: string; value: string
 }
 
 export function App() {
+  // 主页面状态集中存放各业务模块数据，刷新时批量从后端加载。
   const [activeView, setActiveView] = useState<AppView>('overview');
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [livePrice, setLivePrice] = useState<LivePrice | null>(null);
@@ -601,6 +623,7 @@ export function App() {
   const [debugPanelCollapsed, setDebugPanelCollapsed] = useState(true);
 
   const appendStreamEvent = (event: AgentStreamEvent) => {
+    // 追加 SSE 事件并按 id 去重，只保留最近 80 条用于调试面板展示。
     setStreamEvents((current) => {
       const exists = current.some((item) => item.id === event.id && item.type !== 'local');
       if (exists) return current;
@@ -609,6 +632,7 @@ export function App() {
   };
 
   const loadMarketData = async (interval = marketInterval) => {
+    // 按当前周期刷新行情摘要和 K 线列表。
     const [summaryData, rowsData] = await Promise.all([
       requestJson<MarketSummary>(`/api/market/summary?interval=${interval}`),
       requestJson<MarketRow[]>(`/api/market?interval=${interval}&limit=120`)
@@ -618,6 +642,7 @@ export function App() {
   };
 
   const loadLivePrice = async () => {
+    // 高频刷新实时价格；失败时保留当前值并标记错误来源。
     try {
       const result = await requestJson<LivePrice>('/api/market/live-price?symbol=BTCUSDT&market_type=perpetual');
       setLivePrice(result);
@@ -627,6 +652,7 @@ export function App() {
   };
 
   const loadAnalystAccountDetail = async (analystId: number) => {
+    // 加载单个分析师的账户、权益曲线和交易明细。
     setSelectedAnalystId(analystId);
     setLoading(true);
     try {
@@ -646,6 +672,7 @@ export function App() {
   };
 
   const loadAll = async () => {
+    // 首屏和手动刷新使用的批量加载入口。
     setLoading(true);
     setMessage('');
     try {
@@ -699,17 +726,20 @@ export function App() {
   };
 
   useEffect(() => {
+    // 首次进入页面时加载所有数据和实时价格。
     void loadAll();
     void loadLivePrice();
   }, []);
 
   useEffect(() => {
+    // 切换行情周期后，只刷新行情相关数据。
     void loadMarketData(marketInterval).catch((error) => {
       setMessage(error instanceof Error ? error.message : '行情周期加载失败');
     });
   }, [marketInterval]);
 
   useEffect(() => {
+    // 每秒刷新一次实时价格。
     const timer = window.setInterval(() => {
       void loadLivePrice();
     }, 1000);
@@ -717,6 +747,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    // 通过 SSE 订阅 Agent 节点输出和心跳事件。
     const source = new EventSource(`${API_BASE}/api/agent/stream`);
     source.addEventListener('open', () => {
       setStreamConnected(true);
@@ -739,6 +770,7 @@ export function App() {
   }, []);
 
   const submitOpinion = async (event: FormEvent<HTMLFormElement>) => {
+    // 提交分析师观点，后端会解析预测并在必要时返回人工复核项。
     event.preventDefault();
     if (!analystName.trim() || !content.trim()) {
       setMessage('请填写分析师和观点内容');
@@ -770,6 +802,7 @@ export function App() {
   };
 
   const runAgent = async () => {
+    // 手动触发 AI 聚合交易 Agent。
     setLoading(true);
     setMessage('');
     appendStreamEvent({ id: Date.now(), type: 'local', message: '开始运行 AI 聚合交易 Agent', created_at: new Date().toISOString() });
@@ -790,6 +823,7 @@ export function App() {
   };
 
   const verifyDue = async () => {
+    // 手动验证所有已到期预测。
     setLoading(true);
     try {
       const result = await requestJson<{ verified_count: number }>('/api/predictions/verify-due', { method: 'POST' });
@@ -803,6 +837,7 @@ export function App() {
   };
 
   const createReport = async () => {
+    // 手动生成 BTC 每日报告。
     setLoading(true);
     setMessage('');
     appendStreamEvent({ id: Date.now(), type: 'local', message: '开始生成每日 BTC 报告', created_at: new Date().toISOString() });
@@ -832,6 +867,7 @@ export function App() {
   };
 
   const confirmReview = async (review: HumanReview) => {
+    // 确认人工复核草稿，将解析结果正式写入预测表。
     setLoading(true);
     try {
       const result = await requestJson<{ predictions: Prediction[] }>(`/api/reviews/${review.id}/confirm`, {
@@ -855,6 +891,7 @@ export function App() {
   };
 
   const rejectReview = async (review: HumanReview) => {
+    // 拒绝人工复核项，避免错误解析进入正式预测。
     setLoading(true);
     try {
       await requestJson<HumanReview>(`/api/reviews/${review.id}/reject`, {
@@ -885,6 +922,7 @@ export function App() {
   };
 
   const startEditPrediction = (prediction: Prediction) => {
+    // 初始化预测编辑表单。
     setEditingPrediction(prediction);
     setPredictionEditForm({
       direction: prediction.direction,
@@ -898,6 +936,7 @@ export function App() {
   };
 
   const submitPredictionEdit = async (event: FormEvent) => {
+    // 提交人工修正后的预测字段。
     event.preventDefault();
     if (!editingPrediction || !predictionEditForm) return;
     setLoading(true);
@@ -926,6 +965,7 @@ export function App() {
   };
 
   const deletePrediction = async (prediction: Prediction) => {
+    // 删除预测前要求用户确认，避免误删验证和报告数据。
     if (!window.confirm(`确认删除预测 #${prediction.id}？关联验证结果和报告会一并删除。`)) return;
     setLoading(true);
     try {
@@ -970,6 +1010,7 @@ export function App() {
   };
 
   const runSchedulerTask = async (taskName: string) => {
+    // 手动触发后台调度任务，便于在设置页测试。
     setLoading(true);
     try {
       const result = await requestJson<{ status: string }>(`/api/scheduler/tasks/${taskName}/run`, { method: 'POST' });
@@ -983,6 +1024,7 @@ export function App() {
   };
 
   const refreshAccountSnapshot = async () => {
+    // 立即记录一次 AI 聚合账户权益快照。
     setLoading(true);
     try {
       const result = await requestJson<VirtualAccountSummary>('/api/account/ai/snapshot', { method: 'POST' });
@@ -996,6 +1038,7 @@ export function App() {
   };
 
   const market = dashboard?.market;
+  // 以下派生状态统一从接口数据计算，避免在 JSX 中重复处理。
   const latestMarketRow = marketRows[marketRows.length - 1];
   const latestRun = dashboard?.latest_agent_run;
   const openTrade = dashboard?.open_trade;

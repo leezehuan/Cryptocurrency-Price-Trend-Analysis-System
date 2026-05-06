@@ -44,6 +44,7 @@ except ImportError:
 
 NodeFn = Callable[[dict[str, Any]], dict[str, Any]]
 
+# 观点入库流程：清洗文本、解析分析师与预测、检查异常，最后入库或转人工确认。
 OPINION_INGESTION_NODES: list[tuple[str, NodeFn]] = [
     ("text_cleaning", text_cleaning_node),
     ("btc_relevance", btc_relevance_node),
@@ -59,6 +60,7 @@ OPINION_INGESTION_NODES: list[tuple[str, NodeFn]] = [
     ("persist_opinion", persist_opinion_node),
 ]
 
+# 虚拟交易流程：加载行情和待验证预测，生成交易信号、记录运行并执行模拟交易。
 VIRTUAL_TRADE_NODES: list[tuple[str, NodeFn]] = [
     ("load_trade_context", load_trade_context_node),
     ("rule_based_signal_scoring", rule_based_signal_scoring_node),
@@ -70,6 +72,7 @@ VIRTUAL_TRADE_NODES: list[tuple[str, NodeFn]] = [
     ("execute_virtual_trade_rule", execute_virtual_trade_rule_node),
 ]
 
+# 预测验证流程：找出到期预测，按规则评分，并生成解释性报告。
 PREDICTION_VERIFICATION_NODES: list[tuple[str, NodeFn]] = [
     ("load_due_predictions", load_due_predictions_node),
     ("rule_based_verification", rule_based_verification_node),
@@ -79,6 +82,7 @@ PREDICTION_VERIFICATION_NODES: list[tuple[str, NodeFn]] = [
     ("save_verification_report", save_verification_report_node),
 ]
 
+# 每日报告流程：汇总行情、共识、情景分析和账户快照，最后保存日报。
 DAILY_REPORT_NODES: list[tuple[str, NodeFn]] = [
     ("load_daily_report_context", load_daily_report_context_node),
     ("market_summary", report_market_summary_node),
@@ -91,6 +95,7 @@ DAILY_REPORT_NODES: list[tuple[str, NodeFn]] = [
 
 
 def run_sequential(nodes: list[tuple[str, NodeFn]], state: dict[str, Any]) -> dict[str, Any]:
+    # 当 LangGraph 不可用或执行失败时，按列表顺序逐个运行节点。
     current = state
     for _, node in nodes:
         current = node(current)
@@ -98,6 +103,7 @@ def run_sequential(nodes: list[tuple[str, NodeFn]], state: dict[str, Any]) -> di
 
 
 def build_langgraph(nodes: list[tuple[str, NodeFn]]) -> Any:
+    # 将节点列表编排成线性 LangGraph 工作流。
     if StateGraph is None or END is None:
         return None
     workflow = StateGraph(dict)
@@ -111,6 +117,7 @@ def build_langgraph(nodes: list[tuple[str, NodeFn]]) -> Any:
 
 
 def run_graph(graph_name: str, nodes: list[tuple[str, NodeFn]], state: dict[str, Any]) -> dict[str, Any]:
+    # 统一入口：优先使用 LangGraph，失败时自动回退到顺序执行。
     state.setdefault("graph_name", graph_name)
     state.setdefault("node_outputs", {})
     state.setdefault("errors", [])
@@ -126,6 +133,7 @@ def run_graph(graph_name: str, nodes: list[tuple[str, NodeFn]], state: dict[str,
 
 
 def run_opinion_ingestion_graph(conn: sqlite3.Connection, payload: Any, current_price: float) -> dict[str, Any]:
+    # 运行分析师观点解析与入库流程。
     return run_graph(
         "opinion_ingestion",
         OPINION_INGESTION_NODES,
@@ -157,6 +165,7 @@ def run_virtual_trade_signal_graph(
 
 
 def run_prediction_verification_graph(conn: sqlite3.Connection) -> dict[str, Any]:
+    # 运行到期预测验证流程。
     return run_graph(
         "prediction_verification",
         PREDICTION_VERIFICATION_NODES,
@@ -169,6 +178,7 @@ def run_prediction_verification_graph(conn: sqlite3.Connection) -> dict[str, Any
 
 
 def run_daily_report_graph(conn: sqlite3.Connection, trigger: str = "manual") -> dict[str, Any]:
+    # 运行 BTC 每日报告生成流程。
     return run_graph(
         "daily_report",
         DAILY_REPORT_NODES,

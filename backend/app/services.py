@@ -10,6 +10,7 @@ from typing import Any
 
 from .database import DEFAULT_SETTINGS, parse_dt, row_to_dict, rows_to_dicts, setting_value_to_text, utc_now
 
+# 中文规则解析使用的关键词词典，用于在 LLM 不可用时兜底识别观点方向和置信度。
 BULLISH_TERMS = ["看涨", "上涨", "涨到", "涨至", "上看", "突破", "拉升", "反弹", "做多", "多头", "冲高"]
 BEARISH_TERMS = ["看跌", "下跌", "跌到", "跌至", "下看", "回调", "回落", "破位", "做空", "空头", "跳水"]
 SIDEWAYS_TERMS = ["震荡", "横盘", "区间", "观望"]
@@ -21,6 +22,7 @@ GATEIO_SPOT_TICKERS_URL = "https://api.gateio.ws/api/v4/spot/tickers"
 
 
 def parse_setting_value(value: str, value_type: str) -> Any:
+    # 将 settings 表中的字符串值还原为业务需要的类型。
     if value_type == "int":
         return int(value)
     if value_type == "float":
@@ -33,6 +35,7 @@ def parse_setting_value(value: str, value_type: str) -> Any:
 
 
 def list_settings(conn: sqlite3.Connection) -> dict[str, Any]:
+    # 返回设置项列表以及按 key 聚合后的解析值。
     rows = conn.execute("SELECT * FROM settings ORDER BY key ASC").fetchall()
     items = rows_to_dicts(rows)
     values: dict[str, Any] = {}
@@ -43,6 +46,7 @@ def list_settings(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def get_setting_value(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
+    # 优先读取数据库设置，缺失时回退到 DEFAULT_SETTINGS 或传入默认值。
     row = conn.execute("SELECT value, value_type FROM settings WHERE key = ?", (key,)).fetchone()
     if row:
         return parse_setting_value(str(row["value"]), str(row["value_type"]))
@@ -52,6 +56,7 @@ def get_setting_value(conn: sqlite3.Connection, key: str, default: Any = None) -
 
 
 def update_setting(conn: sqlite3.Connection, key: str, value: Any) -> dict[str, Any]:
+    # 新增或更新单个设置项，并保持 value_type 和描述信息。
     row = conn.execute("SELECT * FROM settings WHERE key = ?", (key,)).fetchone()
     if row:
         value_type = str(row["value_type"])
@@ -76,6 +81,7 @@ def update_setting(conn: sqlite3.Connection, key: str, value: Any) -> dict[str, 
 
 
 def reset_default_settings(conn: sqlite3.Connection) -> dict[str, Any]:
+    # 将所有内置设置恢复为默认值。
     for key, (value, value_type, description) in DEFAULT_SETTINGS.items():
         conn.execute(
             """
@@ -95,6 +101,7 @@ def latest_market(
     interval: str | None = None,
     market_type: str | None = None,
 ) -> dict[str, Any]:
+    # 获取指定交易对、市场类型和周期下的最新一根 K 线及指标。
     symbol = symbol or str(get_setting_value(conn, "market.symbol", "BTCUSDT"))
     interval = interval or str(get_setting_value(conn, "market.default_interval", "1h"))
     market_type = market_type or "spot"
@@ -161,6 +168,7 @@ def latest_market(
 
 
 def fetch_live_market_price(symbol: str = "BTCUSDT", market_type: str = "perpetual") -> dict[str, Any]:
+    # 从 Gate.io 实时行情接口读取最新价格。
     symbol = symbol.upper()
     gateio_pair = symbol.replace("USDT", "_USDT")
     query = urllib.parse.urlencode({"currency_pair": gateio_pair})
@@ -183,6 +191,7 @@ def fetch_live_market_price(symbol: str = "BTCUSDT", market_type: str = "perpetu
 
 
 def live_market_price(conn: sqlite3.Connection, symbol: str = "BTCUSDT", market_type: str = "perpetual") -> dict[str, Any]:
+    # 优先返回实时价格；外部接口失败时回退到数据库最新价格。
     try:
         result = fetch_live_market_price(symbol, market_type)
         if result["price"] > 0:
@@ -211,6 +220,7 @@ def market_series(
     symbol: str | None = None,
     market_type: str | None = None,
 ) -> list[dict[str, Any]]:
+    # 查询行情序列并按时间升序返回，便于前端直接绘图。
     symbol = symbol or str(get_setting_value(conn, "market.symbol", "BTCUSDT"))
     interval = interval or str(get_setting_value(conn, "market.default_interval", "1h"))
     market_type = market_type or "spot"
@@ -271,6 +281,7 @@ def market_series(
 
 
 def market_summary(conn: sqlite3.Connection, interval: str | None = None) -> dict[str, Any]:
+    # 基于最近行情计算涨跌幅、支撑压力、波动率和趋势标签。
     latest = latest_market(conn, interval=interval)
     rows = market_series(conn, 48, interval=latest["interval"], symbol=latest["symbol"], market_type=latest["market_type"])
     reference = rows[-25] if len(rows) >= 25 else rows[0]
@@ -314,6 +325,7 @@ def market_summary(conn: sqlite3.Connection, interval: str | None = None) -> dic
 
 
 def get_or_create_analyst(conn: sqlite3.Connection, name: str, source: str | None = None) -> dict[str, Any]:
+    # 按名称复用已有分析师，不存在时创建新分析师。
     clean_name = name.strip()
     row = conn.execute("SELECT * FROM analysts WHERE name = ?", (clean_name,)).fetchone()
     if row:
@@ -337,6 +349,7 @@ def direction_label(direction: str) -> str:
 
 
 def normalize_prediction_direction(value: Any) -> str:
+    # 将模型或用户输入的方向别名统一归一化为内部枚举。
     text = str(value or "sideways").lower()
     if text in {"bull", "long", "up", "buy", "bullish"}:
         return "bullish"
@@ -347,6 +360,7 @@ def normalize_prediction_direction(value: Any) -> str:
     return "unknown"
 
 
+# 这些字段是枚举、ID 或时间，不参与面向用户的文本本地化。
 DISPLAY_TEXT_SKIP_KEYS = {
     "id",
     "agent_run_id",
@@ -408,6 +422,7 @@ def localize_display_text(value: str) -> str:
 
 
 def localize_display_payload(value: Any, key: str = "") -> Any:
+    # 递归本地化展示数据中的英文短语。
     if isinstance(value, dict):
         return {item_key: localize_display_payload(item_value, item_key) for item_key, item_value in value.items()}
     if isinstance(value, list):
@@ -420,6 +435,7 @@ def localize_display_payload(value: Any, key: str = "") -> Any:
 
 
 def horizon_days(horizon: str, conn: sqlite3.Connection | None = None) -> int:
+    # 根据预测周期和系统设置计算默认验证天数。
     mapping = {
         "intraday": int(get_setting_value(conn, "prediction.horizon_intraday_days", 1)) if conn else 1,
         "short": int(get_setting_value(conn, "prediction.horizon_short_days", 7)) if conn else 7,
@@ -435,6 +451,7 @@ def horizon_label(horizon: str) -> str:
 
 
 def detect_horizon(text: str) -> str:
+    # 使用中文时间表达粗略判断预测周期。
     if any(term in text for term in ["日内", "今天", "今日", "24小时"]):
         return "intraday"
     if any(term in text for term in ["短线", "短期", "本周", "几天"]):
@@ -447,6 +464,7 @@ def detect_horizon(text: str) -> str:
 
 
 def detect_direction(text: str) -> str:
+    # 使用关键词判断观点方向；多空同时出现时按首次出现的位置决策。
     bullish = any(term in text for term in BULLISH_TERMS)
     bearish = any(term in text for term in BEARISH_TERMS)
     sideways = any(term in text for term in SIDEWAYS_TERMS)
@@ -464,6 +482,7 @@ def detect_direction(text: str) -> str:
 
 
 def detect_confidence(text: str, target_price: float | None, direction: str) -> str:
+    # 根据置信度关键词、目标价和方向给出兜底置信度。
     if direction == "sideways" or target_price is None:
         return "low"
     if any(term in text for term in HIGH_CONFIDENCE_TERMS):
@@ -474,6 +493,7 @@ def detect_confidence(text: str, target_price: float | None, direction: str) -> 
 
 
 def extract_prices(text: str) -> list[float]:
+    # 从中文观点中提取目标价，支持“7万”和 5-7 位数字价格。
     prices: list[float] = []
     for match in re.finditer(r"(\d+(?:\.\d+)?)\s*万", text):
         prices.append(float(match.group(1)) * 10000)
@@ -488,6 +508,7 @@ def extract_prices(text: str) -> list[float]:
 
 
 def split_opinion_text(text: str) -> list[str]:
+    # 按中文标点切分观点，提升多目标价、多周期预测的解析粒度。
     parts = [part.strip() for part in re.split(r"[。；;\n]", text) if part.strip()]
     clauses: list[str] = []
     for part in parts:
@@ -500,6 +521,7 @@ def split_opinion_text(text: str) -> list[str]:
 
 
 def parse_opinion(content: str, current_price: float) -> list[dict[str, Any]]:
+    # 规则兜底版观点解析：从文本中抽取方向、周期、目标价和摘要。
     predictions: list[dict[str, Any]] = []
     clauses = split_opinion_text(content)
     for clause in clauses:
@@ -564,6 +586,7 @@ def prediction_horizon_rank(prediction: dict[str, Any]) -> tuple[int, int, int]:
 
 
 def dedupe_predictions_by_horizon_direction(predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # 同一周期和方向只保留信息质量最高的一条预测。
     best_by_horizon_direction: dict[tuple[str, str], dict[str, Any]] = {}
     for prediction in predictions:
         horizon = prediction_horizon_key(prediction.get("horizon"))
@@ -597,6 +620,7 @@ def persist_structured_opinion(
     current_price: float,
     predictions: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    # 将结构化观点写入 raw_opinions 和 predictions，并检测是否存在改口。
     analyst = get_or_create_analyst(conn, str(analyst_name), source_url)
     now = utc_now()
     normalized_published_at = published_at or now
@@ -652,6 +676,7 @@ def persist_structured_opinion(
 
 
 def get_human_review_detail(conn: sqlite3.Connection, review_id: int) -> dict[str, Any]:
+    # 读取人工复核项及其草稿，并对展示字段做中文本地化。
     row = conn.execute("SELECT * FROM human_review_items WHERE id = ?", (review_id,)).fetchone()
     review = row_to_dict(row) or {}
     if not review:
@@ -720,6 +745,7 @@ def confirm_human_review(
 
 
 def reject_human_review(conn: sqlite3.Connection, review_id: int, reason: str | None = None) -> dict[str, Any]:
+    # 标记人工复核项为拒绝，并记录拒绝原因。
     detail = get_human_review_detail(conn, review_id)
     if not detail:
         return {}
@@ -735,6 +761,7 @@ def reject_human_review(conn: sqlite3.Connection, review_id: int, reason: str | 
 
 
 def create_opinion(conn: sqlite3.Connection, payload: Any) -> dict[str, Any]:
+    # 运行观点入库 Graph，并在无需人工确认时自动触发交易 Agent。
     from .graphs import run_opinion_ingestion_graph
 
     current_price = latest_market(conn)["close"]
@@ -774,6 +801,7 @@ def prediction_change_record(
     old: dict[str, Any],
     new: dict[str, Any],
 ) -> dict[str, Any] | None:
+    # 比较同一分析师的新旧预测，识别方向反转、目标价变化和周期变化。
     target_threshold = float(get_setting_value(conn, "prediction.target_change_threshold_pct", 0.03))
     confidence_gap_threshold = int(get_setting_value(conn, "prediction.confidence_change_threshold_tiers", 2))
     horizon_severity = float(get_setting_value(conn, "prediction.horizon_change_penalty_factor", 0.75))
@@ -809,6 +837,7 @@ def prediction_change_record(
 
 
 def detect_prediction_conflicts(conn: sqlite3.Connection, analyst_id: int, new_prediction_id: int) -> None:
+    # 新预测入库后，查找同分析师未到期预测并记录“改口”版本。
     new_prediction_row = conn.execute("SELECT * FROM predictions WHERE id = ?", (new_prediction_id,)).fetchone()
     if new_prediction_row is None:
         return
@@ -890,6 +919,7 @@ def list_opinions(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, A
 
 
 def list_predictions(conn: sqlite3.Connection, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    # 返回预测列表，并附带最近一次验证结果和最近一次改口记录。
     params: list[Any] = []
     where = ""
     if status:
@@ -966,6 +996,7 @@ def get_prediction_item(conn: sqlite3.Connection, prediction_id: int) -> dict[st
 
 
 def update_prediction_manual(conn: sqlite3.Connection, prediction_id: int, values: dict[str, Any]) -> dict[str, Any]:
+    # 人工修正预测字段，并写入 prediction_versions 作为审计记录。
     current = row_to_dict(conn.execute("SELECT * FROM predictions WHERE id = ?", (prediction_id,)).fetchone()) or {}
     if not current:
         raise ValueError("prediction not found")
@@ -1029,6 +1060,7 @@ def update_prediction_manual(conn: sqlite3.Connection, prediction_id: int, value
 
 
 def delete_prediction_manual(conn: sqlite3.Connection, prediction_id: int) -> dict[str, Any]:
+    # 删除预测及其验证、报告、版本记录，并解除交易记录引用。
     current = row_to_dict(conn.execute("SELECT * FROM predictions WHERE id = ?", (prediction_id,)).fetchone()) or {}
     if not current:
         raise ValueError("prediction not found")
@@ -1044,6 +1076,7 @@ def delete_prediction_manual(conn: sqlite3.Connection, prediction_id: int) -> di
 
 
 def list_analysts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    # 返回分析师排行榜，并附带各自虚拟账户状态。
     rows = conn.execute(
         """
         SELECT
@@ -1069,6 +1102,7 @@ def list_analysts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def account_trade_filter(analyst_id: int | None = None, account_type: str = "analyst", alias: str = "") -> tuple[str, list[Any]]:
+    # 根据账户类型构造交易查询条件，区分分析师、AI 和未归属账户。
     prefix = f"{alias}." if alias else ""
     if account_type == "ai":
         return f"{prefix}account_type = ?", ["ai"]
@@ -1134,6 +1168,7 @@ def account_default_leverage(conn: sqlite3.Connection) -> float:
 
 
 def account_market(conn: sqlite3.Connection) -> dict[str, Any]:
+    # 读取虚拟账户使用的行情交易对、周期和市场类型。
     symbol = str(get_setting_value(conn, "market.symbol", "BTCUSDT"))
     interval = str(get_setting_value(conn, "market.default_interval", "1h"))
     market_type = str(get_setting_value(conn, "account.market_type", "perpetual"))
@@ -1157,6 +1192,7 @@ def trade_margin(conn: sqlite3.Connection, trade: dict[str, Any]) -> float:
 
 
 def estimate_trade_funding_fee(conn: sqlite3.Connection, trade: dict[str, Any], market: dict[str, Any] | None = None) -> float:
+    # 按资金费率和持仓时间估算合约资金费用。
     if not bool(get_setting_value(conn, "trade.funding_fee_enabled", True)):
         return 0.0
     market = market or account_market(conn)
@@ -1168,6 +1204,7 @@ def estimate_trade_funding_fee(conn: sqlite3.Connection, trade: dict[str, Any], 
 
 
 def trade_unrealized_metrics(conn: sqlite3.Connection, trade: dict[str, Any], mark_price: float, market: dict[str, Any] | None = None) -> dict[str, Any]:
+    # 基于标记价格计算持仓浮动盈亏、预估平仓手续费和保证金信息。
     size = float(trade["size"])
     entry_price = float(trade["entry_price"])
     if trade["side"] == "long":
@@ -1198,6 +1235,7 @@ def account_state_for_analyst(
     analyst_name: str | None = None,
     account_type: str = "analyst",
 ) -> dict[str, Any]:
+    # 计算单个账户的权益、浮盈浮亏、手续费、回撤和持仓明细。
     initial_balance = account_initial_balance(conn)
     market = account_market(conn)
     mark_price = float(market["close"])
@@ -1272,6 +1310,7 @@ def account_state_for_analyst(
 
 
 def account_state(conn: sqlite3.Connection, analyst_id: int | None = None) -> dict[str, Any]:
+    # 无 analyst_id 时返回组合账户；有 analyst_id 时返回单分析师账户。
     if analyst_id is not None:
         analyst = conn.execute("SELECT id, name FROM analysts WHERE id = ?", (analyst_id,)).fetchone()
         analyst_name = analyst["name"] if analyst else None
@@ -1325,12 +1364,14 @@ def account_state(conn: sqlite3.Connection, analyst_id: int | None = None) -> di
 
 
 def ai_account_state(conn: sqlite3.Connection) -> dict[str, Any]:
+    # AI 聚合账户状态额外附带当前聚合交易信号。
     state = account_state_for_analyst(conn, None, "AI 聚合账户", "ai")
     state["signal"] = build_ai_trade_signal(conn)
     return state
 
 
 def insert_account_snapshot(conn: sqlite3.Connection, state: dict[str, Any], snapshot_analyst_id: int | None, snapshot_type: str) -> dict[str, Any]:
+    # 写入账户权益快照，并同步当前持仓的浮动盈亏字段。
     positions = state.get("open_positions") or []
     position = state.get("open_position") or {}
     for item in positions:
@@ -1402,6 +1443,7 @@ def insert_account_snapshot(conn: sqlite3.Connection, state: dict[str, Any], sna
 
 
 def record_account_snapshot(conn: sqlite3.Connection, analyst_id: int | None = None) -> dict[str, Any]:
+    # 记录组合账户或指定分析师账户快照。
     if analyst_id is not None:
         return insert_account_snapshot(conn, account_state(conn, analyst_id), analyst_id, "analyst")
     state = insert_account_snapshot(conn, account_state(conn), None, "aggregate")
@@ -1423,6 +1465,7 @@ def account_summary(conn: sqlite3.Connection, analyst_id: int | None = None, acc
 
 
 def account_equity_curve(conn: sqlite3.Connection, limit: int = 300, analyst_id: int | None = None, account_type: str = "aggregate") -> list[dict[str, Any]]:
+    # 查询权益曲线；没有历史快照时返回当前账户状态作为兜底点。
     if account_type == "ai":
         where = "vas.analyst_id IS NULL AND vas.snapshot_type = 'ai'"
         params: list[Any] = [limit]
@@ -1477,6 +1520,7 @@ def account_equity_curve(conn: sqlite3.Connection, limit: int = 300, analyst_id:
 
 
 def enrich_trade_for_account(conn: sqlite3.Connection, trade: dict[str, Any]) -> dict[str, Any]:
+    # 给交易记录补充名义仓位、杠杆、保证金和实时浮盈浮亏。
     trade["notional_usdt"] = round(trade_notional(conn, trade), 4)
     trade["leverage"] = round(trade_leverage(conn, trade), 4)
     trade["margin"] = round(trade_margin(conn, trade), 4)
@@ -1522,6 +1566,7 @@ def list_trades(conn: sqlite3.Connection, limit: int = 100, analyst_id: int | No
 
 
 def pending_predictions_for_agent(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    # 读取 Agent 生成交易信号所需的待验证预测及分析师评分指标。
     rows = conn.execute(
         """
         SELECT
@@ -1614,6 +1659,7 @@ def recent_prediction_changes_for_report(conn: sqlite3.Connection, limit: int = 
 
 
 def daily_report_context(conn: sqlite3.Connection) -> dict[str, Any]:
+    # 汇总日报 Graph 需要的市场、预测、验证、改口、账户和 Top 分析师信息。
     market = market_summary(conn)
     active_predictions = pending_predictions_for_agent(conn)
     recent_verifications = recent_verification_results_for_report(conn)
@@ -1693,6 +1739,7 @@ def score_predictions(predictions: list[dict[str, Any]], summary: dict[str, Any]
 
 
 def ai_prediction_weight(prediction: dict[str, Any], summary: dict[str, Any]) -> float:
+    # 综合分析师评分、历史准确率、稳定性、虚拟 ROI、置信度和周期计算预测权重。
     weight = max(0.25, min(float(prediction.get("total_score") or 50) / 100, 1.4))
     weighted_win_rate = float(prediction.get("weighted_win_rate") or 0)
     direction_accuracy = float(prediction.get("direction_accuracy") or 0)
@@ -1724,6 +1771,7 @@ def ai_prediction_weight(prediction: dict[str, Any], summary: dict[str, Any]) ->
 
 
 def build_ai_trade_signal(conn: sqlite3.Connection) -> dict[str, Any]:
+    # 根据所有待验证预测和当前行情，生成 AI 聚合账户的多空决策信号。
     summary = market_summary(conn)
     predictions = pending_predictions_for_agent(conn)
     bull_score = 0.0
@@ -1805,6 +1853,7 @@ def build_ai_trade_signal(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def run_agent(conn: sqlite3.Connection, trigger: str = "manual", focus_prediction_ids: list[int] | None = None) -> dict[str, Any]:
+    # 对外暴露的 Agent 运行入口，内部执行虚拟交易 Graph。
     from .graphs import run_virtual_trade_signal_graph
 
     state = run_virtual_trade_signal_graph(conn, trigger, focus_prediction_ids)
@@ -1812,6 +1861,7 @@ def run_agent(conn: sqlite3.Connection, trigger: str = "manual", focus_predictio
 
 
 def close_trade(conn: sqlite3.Connection, trade: dict[str, Any], price: float, reason: str) -> float:
+    # 按当前价格平仓，计算手续费、资金费和最终已实现盈亏。
     size = float(trade["size"])
     entry_price = float(trade["entry_price"])
     fee_rate = float(get_setting_value(conn, "trade.taker_fee_rate", 0.0005))
@@ -1870,6 +1920,7 @@ def execute_trade_decision(
     focus_prediction: dict[str, Any] | None,
     reason: str,
 ) -> str:
+    # 旧版按单个分析师预测执行虚拟交易的规则入口。
     market = account_market(conn)
     price = float(market["close"])
     target_side = "long" if decision == "open_long" else "short"
@@ -1933,6 +1984,7 @@ def execute_ai_trade_decision(
     signal: dict[str, Any] | None,
     reason: str,
 ) -> str:
+    # 按 AI 聚合信号执行虚拟交易；同向持仓继续持有，反向信号先平后开。
     signal = signal or build_ai_trade_signal(conn)
     decision = str(signal.get("decision") or "observe")
     if decision not in {"open_long", "open_short"} or not signal.get("should_execute"):
@@ -1991,6 +2043,7 @@ def execute_ai_trade_decision(
 
 
 def verify_due_predictions(conn: sqlite3.Connection) -> dict[str, Any]:
+    # 对外暴露的到期预测验证入口，内部执行验证 Graph。
     from .graphs import run_prediction_verification_graph
 
     state = run_prediction_verification_graph(conn)
@@ -1998,6 +2051,7 @@ def verify_due_predictions(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def prediction_quality_label(score: float) -> str:
+    # 将综合评分映射为前端展示的质量标签。
     if score >= 0.8:
         return "high_quality_success"
     if score >= 0.6:
@@ -2026,6 +2080,7 @@ def build_verification_report(
     explanation: dict[str, Any] | None = None,
     failure_reason: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # 生成面向用户的预测验证报告，包含评分拆解和行情路径。
     score = float(verification.get("score") or verification.get("final_score") or 0)
     status = str(verification.get("status") or "unknown")
     quality_label = str(verification.get("quality_label") or prediction_quality_label(score))
@@ -2090,6 +2145,7 @@ def save_prediction_verification_report(
     failure_reason: dict[str, Any] | None = None,
     commit: bool = True,
 ) -> dict[str, Any]:
+    # 将预测验证报告保存到 verification_reports 表。
     report = build_verification_report(prediction, verification, explanation, failure_reason)
     cursor = conn.execute(
         """
@@ -2112,6 +2168,7 @@ def save_prediction_verification_report(
 
 
 def verify_prediction(conn: sqlite3.Connection, prediction: dict[str, Any]) -> dict[str, Any]:
+    # 根据验证窗口内行情计算方向分、目标价分、时间分和最终状态。
     latest = latest_market(conn)
     base_price = float(prediction["current_price"])
     latest_price = float(latest["close"])
@@ -2265,6 +2322,7 @@ def analyst_horizon_rate(rows: list[dict[str, Any]], horizon: str) -> float:
 
 
 def recompute_analyst_metrics(conn: sqlite3.Connection, analyst_id: int) -> None:
+    # 基于最新验证结果、改口率和虚拟交易收益重算分析师评分。
     predictions_stats = conn.execute(
         """
         SELECT
@@ -2366,6 +2424,7 @@ def latest_agent_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
 
 
 def dashboard(conn: sqlite3.Connection) -> dict[str, Any]:
+    # 返回首页总览所需的市场、待验证预测、AI 账户和 Top 分析师数据。
     summary = market_summary(conn)
     pending_count = conn.execute("SELECT COUNT(*) AS count FROM predictions WHERE status = 'pending'").fetchone()["count"]
     due_count = conn.execute(

@@ -6,6 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+# 以项目根目录为基准定位 config 配置目录。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 MODEL_API_CONFIG = CONFIG_DIR / "model_api.json"
@@ -14,12 +15,14 @@ PROMPTS_CONFIG = CONFIG_DIR / "prompts.json"
 
 
 def read_json(path: Path) -> dict[str, Any]:
+    # 配置文件不存在时返回空字典，方便与默认配置合并。
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    # 递归合并配置，让本地配置只覆盖需要变更的字段。
     result = deepcopy(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(result.get(key), dict):
@@ -30,6 +33,7 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 
 
 def mask_secret(value: str | None) -> str:
+    # 对外展示配置时隐藏 API Key 等敏感信息。
     if not value:
         return ""
     if len(value) <= 8:
@@ -38,6 +42,7 @@ def mask_secret(value: str | None) -> str:
 
 
 def load_model_api_config(mask_secrets: bool = True) -> dict[str, Any]:
+    # 合并默认模型配置和本地私有配置，并优先读取环境变量中的 API Key。
     config = deep_merge(read_json(MODEL_API_CONFIG), read_json(MODEL_API_LOCAL_CONFIG))
     providers = config.get("providers", {})
     for provider in providers.values():
@@ -51,10 +56,12 @@ def load_model_api_config(mask_secrets: bool = True) -> dict[str, Any]:
 
 
 def load_prompts_config() -> dict[str, Any]:
+    # 读取所有 Graph 节点使用的提示词配置。
     return read_json(PROMPTS_CONFIG)
 
 
 def load_runtime_config() -> dict[str, Any]:
+    # 返回前端设置页需要展示的完整运行时配置。
     return {
         "model_api": load_model_api_config(mask_secrets=True),
         "prompts": load_prompts_config(),

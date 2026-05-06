@@ -55,8 +55,10 @@ from .services import (
     verify_due_predictions,
 )
 
+# 创建 FastAPI 应用实例，统一承载行情、预测、Agent 和报告接口。
 app = FastAPI(title="BTC Agent Decision API", version="0.1.0")
 
+# 允许本地前端开发服务器访问后端 API。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -68,6 +70,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def strip_bit_prefix(request: Request, call_next):
+    # 兼容前端以 /bit 作为 API 前缀访问后端的部署方式。
     if request.scope["path"] == "/bit":
         request.scope["path"] = "/"
     elif request.scope["path"].startswith("/bit/"):
@@ -77,16 +80,19 @@ async def strip_bit_prefix(request: Request, call_next):
 
 @app.on_event("startup")
 def startup() -> None:
+    # 服务启动时初始化数据库，并按配置启动后台调度器。
     init_db()
     start_scheduler()
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
+    # 服务停止时关闭调度器，避免后台线程残留。
     stop_scheduler()
 
 
 def get_db() -> Generator[sqlite3.Connection, None, None]:
+    # 为每个请求创建数据库连接，请求结束后自动关闭。
     conn = connect()
     try:
         yield conn
@@ -96,6 +102,7 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
 
 @app.get("/")
 def root() -> dict[str, str]:
+    # 根路径返回服务基本信息，便于快速确认后端可用。
     return {"name": "BTC Agent Decision API", "docs": "/docs"}
 
 
@@ -127,6 +134,7 @@ def get_market(
     interval: str | None = None,
     db: sqlite3.Connection = Depends(get_db),
 ) -> list[dict[str, object]]:
+    # 返回指定周期的行情 K 线序列，用于前端图表展示。
     return market_series(db, limit, interval)
 
 
@@ -157,6 +165,7 @@ def post_sync_real_market(
     days: int | None = Query(default=None, ge=1, le=365),
     db: sqlite3.Connection = Depends(get_db),
 ) -> dict[str, object]:
+    # 从外部行情源同步真实市场数据，并可选择覆盖已有数据。
     return sync_real_market_data(db, symbol=symbol, interval=interval, limit=limit, replace=replace, market_type=market_type, days=days)
 
 
@@ -185,6 +194,7 @@ def post_sync_market_history(
 
 @app.get("/api/config")
 def get_config() -> dict[str, object]:
+    # 返回脱敏后的运行时配置，供设置页展示。
     return load_runtime_config()
 
 
@@ -208,6 +218,7 @@ def get_account(
     analyst_id: int | None = Query(default=None, ge=1),
     db: sqlite3.Connection = Depends(get_db),
 ) -> dict[str, object]:
+    # 查询交易员账户或聚合账户的当前虚拟权益状态。
     return account_summary(db, analyst_id)
 
 
@@ -248,6 +259,7 @@ def post_ai_account_snapshot(db: sqlite3.Connection = Depends(get_db)) -> dict[s
 
 @app.post("/api/config/model/test")
 def post_test_model_connection() -> dict[str, object]:
+    # 使用配置的模型服务执行一次最小化调用，验证模型连接。
     return test_model_connection()
 
 
@@ -285,6 +297,7 @@ def get_analyst_replay_view(
 
 @app.post("/api/opinions")
 def post_opinion(payload: OpinionCreate, db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    # 接收分析师观点，触发观点解析、预测入库和后续 Agent 运行。
     return create_opinion(db, payload)
 
 
@@ -363,6 +376,7 @@ def get_agent_stream_events(
 @app.get("/api/agent/stream")
 async def get_agent_stream(after_id: int = Query(default=0, ge=0)) -> StreamingResponse:
     async def event_generator() -> Generator[str, None, None]:
+        # 使用 SSE 持续推送 Agent 节点输出；无新事件时发送心跳。
         last_id = after_id
         while True:
             try:
@@ -425,6 +439,7 @@ def post_confirm_review(
     payload: ReviewConfirmCreate,
     db: sqlite3.Connection = Depends(get_db),
 ) -> dict[str, object]:
+    # 人工确认解析结果后，将草稿预测正式入库并触发 Agent。
     return confirm_human_review(db, review_id, payload.analyst_name, payload.source_url, payload.published_at, payload.predictions)
 
 
@@ -457,6 +472,7 @@ def get_prediction_verification(prediction_id: int, db: sqlite3.Connection = Dep
 
 @app.post("/api/reports/daily")
 def post_daily_report(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    # 手动生成一份 BTC 每日报告。
     return create_daily_report(db)
 
 

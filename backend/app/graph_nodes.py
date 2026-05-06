@@ -11,17 +11,21 @@ from .llm_client import call_llm_node, standard_node_output
 
 
 def as_json(value: Any) -> str:
+    # 统一 JSON 序列化方式，保证中文不被转义。
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def payload_value(payload: Any, name: str, default: Any = None) -> Any:
+    # 兼容 Pydantic 模型和普通对象读取字段。
     return getattr(payload, name, default)
 
 
 def compact_state(state: dict[str, Any]) -> dict[str, Any]:
+    # 记录节点输入时排除数据库连接，避免不可序列化。
     return {key: value for key, value in state.items() if key != "conn"}
 
 
+# 这些键对应枚举、ID 或时间，不做展示文本翻译。
 DISPLAY_TEXT_SKIP_KEYS = {
     "id",
     "agent_run_id",
@@ -47,6 +51,7 @@ DISPLAY_TEXT_SKIP_KEYS = {
 }
 
 
+# 本地兜底翻译表，用于模型不可用时翻译常见展示短语。
 LOCAL_TRANSLATION_MAP = {
     "high": "高",
     "medium": "中",
@@ -110,6 +115,7 @@ def local_translate_text(value: str) -> str:
 
 
 def translate_display_payload(value: Any, key: str = "") -> Any:
+    # 递归翻译面向用户展示的英文文本。
     if isinstance(value, dict):
         return {item_key: translate_display_payload(item_value, item_key) for item_key, item_value in value.items()}
     if isinstance(value, list):
@@ -132,6 +138,7 @@ def payload_has_translatable_english(value: Any, key: str = "") -> bool:
 
 
 def collect_display_payload(state: dict[str, Any]) -> dict[str, Any]:
+    # 从当前 Graph 状态中抽取可能需要前端展示的字段。
     return {
         "parsed_predictions": state.get("parsed_predictions", []),
         "signal": state.get("signal", {}),
@@ -145,6 +152,7 @@ def collect_display_payload(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def replace_node_data(state: dict[str, Any], node_name: str, data: Any) -> None:
+    # 替换已记录节点输出中的 data，保持回放内容与展示内容一致。
     node_outputs = state.get("node_outputs") or {}
     node_output = node_outputs.get(node_name)
     if isinstance(node_output, dict):
@@ -152,6 +160,7 @@ def replace_node_data(state: dict[str, Any], node_name: str, data: Any) -> None:
 
 
 def apply_display_payload(state: dict[str, Any], payload: dict[str, Any]) -> None:
+    # 将翻译后的展示字段写回 Graph 状态。
     if payload.get("parsed_predictions"):
         state["parsed_predictions"] = payload["parsed_predictions"]
     if payload.get("signal"):
@@ -168,6 +177,7 @@ def apply_display_payload(state: dict[str, Any], payload: dict[str, Any]) -> Non
 
 
 def record_node(state: dict[str, Any], node_name: str, output: dict[str, Any], input_snapshot: dict[str, Any] | None = None) -> None:
+    # 将每个节点的输入输出落库，供前端实时流和节点回放使用。
     conn: sqlite3.Connection = state["conn"]
     try:
         cursor = conn.execute(
@@ -196,6 +206,7 @@ def record_node(state: dict[str, Any], node_name: str, output: dict[str, Any], i
 
 
 def apply_node_output(state: dict[str, Any], node_name: str, output: dict[str, Any], input_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    # 合并节点输出、收集警告错误，并持久化节点运行记录。
     node_outputs = dict(state.get("node_outputs") or {})
     node_outputs[node_name] = output
     state["node_outputs"] = node_outputs
@@ -218,6 +229,7 @@ def llm_or_fallback(
     values: dict[str, Any],
     fallback: dict[str, Any],
 ) -> dict[str, Any]:
+    # 优先调用 LLM 节点；失败时返回规则兜底数据，保证流程可继续。
     try:
         output = call_llm_node(graph_name, node_name, values)
     except Exception as exc:
@@ -233,6 +245,7 @@ def llm_or_fallback(
 
 
 def display_translation_node(state: dict[str, Any]) -> dict[str, Any]:
+    # 对 Graph 输出中面向用户的英文文本做中文化处理。
     display_payload = translate_display_payload(collect_display_payload(state))
     if payload_has_translatable_english(display_payload):
         output = llm_or_fallback(
@@ -288,6 +301,7 @@ def normalize_confidence(value: Any) -> str:
 
 
 def normalize_prediction(item: dict[str, Any], current_price: float) -> dict[str, Any]:
+    # 将 LLM 或规则解析出的预测统一整理成入库字段。
     target = item.get("target_price")
     if target is None and item.get("target_price_min") is not None and item.get("target_price_max") is not None:
         target = (float(item["target_price_min"]) + float(item["target_price_max"])) / 2
@@ -413,6 +427,7 @@ def opinion_summary_node(state: dict[str, Any]) -> dict[str, Any]:
 def prediction_extraction_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
+    # 先尝试 LLM 抽取预测，失败或为空时使用本地中文规则解析兜底。
     text = output_data(state, "btc_relevance").get("btc_relevant_text") or payload_value(state["payload"], "content", "")
     rule_predictions = rules.parse_opinion(str(text), float(state["current_price"]))
     fallback = {"predictions": rule_predictions, "unverifiable_statements": []}
@@ -486,6 +501,7 @@ def human_confirmation_decision_node(state: dict[str, Any]) -> dict[str, Any]:
 def persist_opinion_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
+    # 根据是否需要人工确认，决定写入复核草稿还是直接写入正式预测。
     conn = state["conn"]
     payload = state["payload"]
     analyst_data = output_data(state, "analyst_identification")
@@ -572,6 +588,7 @@ def persist_opinion_node(state: dict[str, Any]) -> dict[str, Any]:
 def load_trade_context_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
+    # 加载行情摘要和待验证预测，作为虚拟交易信号输入。
     summary = rules.market_summary(state["conn"])
     predictions = rules.pending_predictions_for_agent(state["conn"])
     state["market"] = summary
@@ -583,6 +600,7 @@ def load_trade_context_node(state: dict[str, Any]) -> dict[str, Any]:
 def rule_based_signal_scoring_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
+    # 使用规则模型计算 AI 聚合账户的多空加权分。
     signal = rules.build_ai_trade_signal(state["conn"])
     state["signal"] = signal
     output = standard_node_output("rule_based_signal_scoring", signal)
@@ -590,6 +608,7 @@ def rule_based_signal_scoring_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def risk_rule_node(state: dict[str, Any]) -> dict[str, Any]:
+    # 根据波动率、观点分歧和预测数量生成风险提示。
     predictions = state.get("pending_predictions", [])
     summary = state["market"]
     signal = state["signal"]
@@ -610,6 +629,7 @@ def risk_rule_node(state: dict[str, Any]) -> dict[str, Any]:
 def trade_decision_rule_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
+    # 将交易信号转换成开多、开空或观望决策。
     signal = state["signal"]
     decision = signal.get("decision", "observe")
     decision_label = {"open_long": "开多", "open_short": "开空", "observe": "观望"}.get(decision, str(decision))
@@ -649,6 +669,7 @@ def trade_signal_explanation_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
+    # 保存一次 Agent 运行摘要，并把前置节点记录关联到该运行。
     conn = state["conn"]
     summary = state["market"]
     signal = state["signal"]
@@ -708,6 +729,7 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
 def execute_virtual_trade_rule_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
+    # 根据 Agent 决策执行 AI 聚合账户的虚拟交易，并更新运行输出。
     market_text = output_data(state, "persist_agent_run").get("market_summary", "")
     trade_event = rules.execute_ai_trade_decision(state["conn"], int(state["agent_run_id"]), state.get("signal"), market_text)
     state["trade_event"] = trade_event
@@ -731,6 +753,7 @@ def execute_virtual_trade_rule_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_due_predictions_node(state: dict[str, Any]) -> dict[str, Any]:
+    # 读取已经到验证时间的待验证预测。
     rows = state["conn"].execute(
         """
         SELECT * FROM predictions
@@ -748,6 +771,7 @@ def load_due_predictions_node(state: dict[str, Any]) -> dict[str, Any]:
 def rule_based_verification_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
+    # 对每条到期预测执行本地规则验证。
     verified = []
     for prediction in state.get("due_predictions", []):
         verified.append(rules.verify_prediction(state["conn"], prediction))
@@ -813,6 +837,7 @@ def failure_reason_node(state: dict[str, Any]) -> dict[str, Any]:
 def save_verification_report_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
+    # 保存预测验证解释和失败原因，供预测详情页展示。
     explanations = {item["prediction_id"]: item for item in output_data(state, "verification_explanation").get("items", [])}
     reasons = {item["prediction_id"]: item for item in output_data(state, "failure_reason").get("items", [])}
     predictions = {item["id"]: item for item in state.get("due_predictions", [])}
@@ -836,6 +861,7 @@ def save_verification_report_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def report_direction_distribution(predictions: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    # 按预测周期统计多空震荡分布。
     distributions: dict[str, dict[str, int]] = {
         "all": {"bullish": 0, "bearish": 0, "sideways": 0, "unknown": 0},
         "intraday": {"bullish": 0, "bearish": 0, "sideways": 0, "unknown": 0},
@@ -856,6 +882,7 @@ def report_direction_distribution(predictions: list[dict[str, Any]]) -> dict[str
 
 
 def report_weighted_consensus(predictions: list[dict[str, Any]]) -> dict[str, Any]:
+    # 按分析师评分和置信度计算加权共识方向。
     scores = {"bullish": 0.0, "bearish": 0.0, "sideways": 0.0}
     for prediction in predictions:
         direction = str(prediction.get("direction") or "sideways")
@@ -878,6 +905,7 @@ def report_weighted_consensus(predictions: list[dict[str, Any]]) -> dict[str, An
 def load_daily_report_context_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
+    # 汇总日报所需的行情、预测、验证、改口和账户上下文。
     context = rules.daily_report_context(state["conn"])
     market = context["market"]
     predictions = context["active_predictions"]
@@ -902,6 +930,7 @@ def load_daily_report_context_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def report_market_summary_node(state: dict[str, Any]) -> dict[str, Any]:
+    # 生成日报中的行情摘要，LLM 不可用时使用规则摘要。
     market = state["market"]
     rsi = market.get("rsi_14")
     funding_rate = float(market.get("funding_rate") or 0)
@@ -939,6 +968,7 @@ def report_market_summary_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def analyst_consensus_node(state: dict[str, Any]) -> dict[str, Any]:
+    # 生成日报中的分析师共识和分歧信息。
     predictions = state.get("active_predictions", [])
     distributions = report_direction_distribution(predictions)
     weighted = report_weighted_consensus(predictions)
@@ -975,6 +1005,7 @@ def analyst_consensus_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def scenario_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
+    # 基于行情和共识生成多头、空头、震荡等情景分析。
     market_summary_data = output_data(state, "market_summary")
     consensus = output_data(state, "analyst_consensus")
     market = state["market"]
@@ -1002,6 +1033,7 @@ def scenario_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
+    # 汇总各节点结果，形成最终日报结构。
     market_summary_data = output_data(state, "market_summary")
     consensus = output_data(state, "analyst_consensus")
     scenarios = output_data(state, "scenario_analysis")
@@ -1051,6 +1083,7 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
+    # 将日报 JSON 保存到 agent_reports 表。
     report = state.get("report", {})
     created_at = utc_now()
     cursor = state["conn"].execute(
