@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .database import connect
+from .database import connect, parse_dt
 from .services import get_setting_value, run_scheduled_task
 
 try:
@@ -12,14 +13,80 @@ except ImportError:  # pragma: no cover
     BackgroundScheduler = None
 
 _scheduler: Any = None
+DUE_VERIFICATION_JOB_ID = "verify_due_at_next_prediction"
 
 
-def _run_task(task_name: str) -> None:
+def _run_task(task_name: str) -> dict[str, Any] | None:
     conn = connect()
     try:
-        run_scheduled_task(conn, task_name)
+        return run_scheduled_task(conn, task_name)
     finally:
         conn.close()
+
+
+def _next_pending_verification_time() -> datetime | None:
+    conn = connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT verification_time
+            FROM predictions
+            WHERE status = 'pending'
+            ORDER BY verification_time ASC, id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return parse_dt(str(row["verification_time"]))
+
+
+def _due_verification_retry_time() -> datetime:
+    conn = connect()
+    try:
+        retry_minutes = int(get_setting_value(conn, "scheduler.verify_due_minutes", 30))
+    finally:
+        conn.close()
+    return datetime.now(timezone.utc) + timedelta(minutes=max(1, retry_minutes))
+
+
+def _replace_due_verification_job(run_at: datetime) -> None:
+    scheduler = _scheduler
+    if scheduler is None:
+        return
+    now = datetime.now(timezone.utc)
+    scheduler.add_job(
+        _run_due_verification,
+        "date",
+        run_date=run_at if run_at > now else now + timedelta(seconds=1),
+        id=DUE_VERIFICATION_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=None,
+    )
+
+
+def schedule_next_due_verification() -> None:
+    scheduler = _scheduler
+    if scheduler is None:
+        return
+    run_at = _next_pending_verification_time()
+    if run_at is None:
+        if scheduler.get_job(DUE_VERIFICATION_JOB_ID):
+            scheduler.remove_job(DUE_VERIFICATION_JOB_ID)
+        return
+    _replace_due_verification_job(run_at)
+
+
+def _run_due_verification() -> None:
+    result = _run_task("verify_due") or {}
+    if result.get("status") == "failed":
+        _replace_due_verification_job(_due_verification_retry_time())
+        return
+    schedule_next_due_verification()
 
 
 def scheduler_enabled_for_process() -> bool:
@@ -36,20 +103,18 @@ def start_scheduler() -> None:
     try:
         enabled = bool(get_setting_value(conn, "scheduler.enabled", False))
         market_sync_minutes = int(get_setting_value(conn, "scheduler.market_sync_minutes", 60))
-        verify_due_minutes = int(get_setting_value(conn, "scheduler.verify_due_minutes", 30))
         account_snapshot_minutes = int(get_setting_value(conn, "scheduler.account_snapshot_minutes", 15))
         daily_report_hour = int(get_setting_value(conn, "scheduler.daily_report_hour", 8))
     finally:
         conn.close()
-    if not enabled:
-        return
     scheduler = BackgroundScheduler(timezone="UTC")
-    scheduler.add_job(_run_task, "interval", minutes=max(1, market_sync_minutes), args=["market_sync"], id="market_sync", replace_existing=True)
-    scheduler.add_job(_run_task, "interval", minutes=max(1, verify_due_minutes), args=["verify_due"], id="verify_due", replace_existing=True)
-    scheduler.add_job(_run_task, "interval", minutes=max(1, account_snapshot_minutes), args=["account_snapshot"], id="account_snapshot", replace_existing=True)
-    scheduler.add_job(_run_task, "cron", hour=max(0, min(23, daily_report_hour)), minute=0, args=["daily_report"], id="daily_report", replace_existing=True)
-    scheduler.start()
     _scheduler = scheduler
+    if enabled:
+        scheduler.add_job(_run_task, "interval", minutes=max(1, market_sync_minutes), args=["market_sync"], id="market_sync", replace_existing=True)
+        scheduler.add_job(_run_task, "interval", minutes=max(1, account_snapshot_minutes), args=["account_snapshot"], id="account_snapshot", replace_existing=True)
+        scheduler.add_job(_run_task, "cron", hour=max(0, min(23, daily_report_hour)), minute=0, args=["daily_report"], id="daily_report", replace_existing=True)
+    schedule_next_due_verification()
+    scheduler.start()
 
 
 def stop_scheduler() -> None:

@@ -21,6 +21,14 @@ BINANCE_FUTURES_PREMIUM_INDEX_URL = "https://fapi.binance.com/fapi/v1/premiumInd
 GATEIO_SPOT_TICKERS_URL = "https://api.gateio.ws/api/v4/spot/tickers"
 
 
+def refresh_due_verification_schedule() -> None:
+    try:
+        from .scheduler import schedule_next_due_verification
+    except ImportError:
+        return
+    schedule_next_due_verification()
+
+
 def parse_setting_value(value: str, value_type: str) -> Any:
     # 将 settings 表中的字符串值还原为业务需要的类型。
     if value_type == "int":
@@ -665,6 +673,7 @@ def persist_structured_opinion(
     conn.execute("UPDATE analysts SET latest_opinion = ?, updated_at = ? WHERE id = ?", (content.strip(), now, analyst["id"]))
     conn.commit()
     recompute_analyst_metrics(conn, analyst["id"])
+    refresh_due_verification_schedule()
     raw_opinion = conn.execute("SELECT * FROM raw_opinions WHERE id = ?", (raw_opinion_id,)).fetchone()
     return {
         "analyst": analyst,
@@ -816,7 +825,10 @@ def prediction_change_record(
     if (same_horizon or same_direction) and target_pct is not None and target_pct >= target_threshold:
         changes.append({"type": "target_price_shift", "severity": min(1.0, target_pct / max(target_threshold, 0.0001)), "label": f"目标价变化 {round(target_pct * 100, 2)}%"})
     elif same_horizon and (old.get("target_price") is None) != (new.get("target_price") is None):
-        changes.append({"type": "target_price_added_or_removed", "severity": 0.6, "label": "目标价新增或移除"})
+        if old.get("target_price") is None:
+            changes.append({"type": "target_price_added", "severity": 0.6, "label": "目标价新增"})
+        else:
+            changes.append({"type": "target_price_removed", "severity": 0.6, "label": "目标价移除"})
     if not same_horizon and same_direction:
         changes.append({"type": "horizon_shift", "severity": max(0.0, min(1.0, horizon_severity)), "label": "预测周期变化"})
     confidence_gap = abs(confidence_rank(old.get("confidence")) - confidence_rank(new.get("confidence")))
@@ -939,7 +951,9 @@ def list_predictions(conn: sqlite3.Connection, status: str | None = None, limit:
             vr.price_change_pct AS latest_price_change_pct,
             pv.change_type AS latest_change_type,
             pv.change_severity AS latest_change_severity,
-            pv.reason AS latest_change_reason
+            pv.reason AS latest_change_reason,
+            pv.old_target_price AS latest_old_target_price,
+            pv.new_target_price AS latest_new_target_price
         FROM predictions p
         JOIN analysts a ON a.id = p.analyst_id
         LEFT JOIN verification_results vr ON vr.id = (
@@ -953,7 +967,7 @@ def list_predictions(conn: sqlite3.Connection, status: str | None = None, limit:
             WHERE pv2.prediction_id = p.id OR pv2.new_prediction_id = p.id
         )
         {where}
-        ORDER BY p.created_at DESC
+        ORDER BY p.verification_time ASC, p.created_at ASC
         LIMIT ?
         """,
         params,
@@ -975,7 +989,9 @@ def get_prediction_item(conn: sqlite3.Connection, prediction_id: int) -> dict[st
             vr.price_change_pct AS latest_price_change_pct,
             pv.change_type AS latest_change_type,
             pv.change_severity AS latest_change_severity,
-            pv.reason AS latest_change_reason
+            pv.reason AS latest_change_reason,
+            pv.old_target_price AS latest_old_target_price,
+            pv.new_target_price AS latest_new_target_price
         FROM predictions p
         JOIN analysts a ON a.id = p.analyst_id
         LEFT JOIN verification_results vr ON vr.id = (
@@ -1056,6 +1072,7 @@ def update_prediction_manual(conn: sqlite3.Connection, prediction_id: int, value
     )
     recompute_analyst_metrics(conn, int(current["analyst_id"]))
     conn.commit()
+    refresh_due_verification_schedule()
     return get_prediction_item(conn, prediction_id)
 
 
@@ -1072,6 +1089,7 @@ def delete_prediction_manual(conn: sqlite3.Connection, prediction_id: int) -> di
     conn.execute("DELETE FROM predictions WHERE id = ?", (prediction_id,))
     recompute_analyst_metrics(conn, analyst_id)
     conn.commit()
+    refresh_due_verification_schedule()
     return {"deleted": True, "prediction_id": prediction_id}
 
 
