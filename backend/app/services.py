@@ -380,7 +380,6 @@ DISPLAY_TEXT_SKIP_KEYS = {
     "confidence",
     "status",
     "decision",
-    "should_execute",
     "created_at",
     "updated_at",
     "verification_time",
@@ -770,7 +769,7 @@ def reject_human_review(conn: sqlite3.Connection, review_id: int, reason: str | 
 
 
 def create_opinion(conn: sqlite3.Connection, payload: Any) -> dict[str, Any]:
-    # 运行观点入库 Graph，并在无需人工确认时自动触发交易 Agent。
+    # 运行观点入库 Graph，并在无需人工确认时自动触发分析 Agent。
     from .graphs import run_opinion_ingestion_graph
 
     current_price = latest_market(conn)["close"]
@@ -1077,12 +1076,10 @@ def update_prediction_manual(conn: sqlite3.Connection, prediction_id: int, value
 
 
 def delete_prediction_manual(conn: sqlite3.Connection, prediction_id: int) -> dict[str, Any]:
-    # 删除预测及其验证、报告、版本记录，并解除交易记录引用。
     current = row_to_dict(conn.execute("SELECT * FROM predictions WHERE id = ?", (prediction_id,)).fetchone()) or {}
     if not current:
         raise ValueError("prediction not found")
     analyst_id = int(current["analyst_id"])
-    conn.execute("UPDATE virtual_trades SET prediction_id = NULL WHERE prediction_id = ?", (prediction_id,))
     conn.execute("DELETE FROM verification_reports WHERE prediction_id = ?", (prediction_id,))
     conn.execute("DELETE FROM verification_results WHERE prediction_id = ?", (prediction_id,))
     conn.execute("DELETE FROM prediction_versions WHERE prediction_id = ? OR new_prediction_id = ?", (prediction_id, prediction_id))
@@ -1094,7 +1091,6 @@ def delete_prediction_manual(conn: sqlite3.Connection, prediction_id: int) -> di
 
 
 def list_analysts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    # 返回分析师排行榜，并附带各自虚拟账户状态。
     rows = conn.execute(
         """
         SELECT
@@ -1108,483 +1104,11 @@ def list_analysts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         ORDER BY a.total_score DESC, a.updated_at DESC
         """
     ).fetchall()
-    items = rows_to_dicts(rows)
-    for item in items:
-        account = account_state(conn, int(item["id"]))
-        item["account"] = account
-        item["account_equity"] = account["equity"]
-        item["account_roi"] = account["roi"]
-        item["account_unrealized_pnl"] = account["unrealized_pnl"]
-        item["open_position_count"] = len(account.get("open_positions") or [])
-    return items
-
-
-def account_trade_filter(analyst_id: int | None = None, account_type: str = "analyst", alias: str = "") -> tuple[str, list[Any]]:
-    # 根据账户类型构造交易查询条件，区分分析师、AI 和未归属账户。
-    prefix = f"{alias}." if alias else ""
-    if account_type == "ai":
-        return f"{prefix}account_type = ?", ["ai"]
-    if account_type == "unassigned":
-        return f"{prefix}analyst_id IS NULL AND {prefix}account_type = ?", ["unassigned"]
-    if analyst_id is None:
-        return f"{prefix}analyst_id IS NULL AND {prefix}account_type = ?", ["unassigned"]
-    return f"{prefix}analyst_id = ? AND {prefix}account_type = ?", [analyst_id, "analyst"]
-
-
-def analyst_trade_filter(analyst_id: int | None, alias: str = "") -> tuple[str, list[Any]]:
-    if analyst_id is None:
-        return account_trade_filter(None, "unassigned", alias)
-    return account_trade_filter(analyst_id, "analyst", alias)
-
-
-def account_scope_analysts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = conn.execute("SELECT id, name FROM analysts ORDER BY name ASC").fetchall()
     return rows_to_dicts(rows)
-
-
-def current_open_trade(conn: sqlite3.Connection, analyst_id: int | None = None, account_type: str = "analyst") -> dict[str, Any] | None:
-    params: list[Any] = []
-    where = "vt.status = 'open'"
-    condition, condition_params = account_trade_filter(analyst_id, account_type, "vt")
-    where += f" AND {condition}"
-    params.extend(condition_params)
-    row = conn.execute(
-        f"""
-        SELECT vt.*, a.name AS analyst_name
-        FROM virtual_trades vt
-        LEFT JOIN analysts a ON a.id = vt.analyst_id
-        WHERE {where}
-        ORDER BY vt.opened_at DESC
-        LIMIT 1
-        """,
-        params,
-    ).fetchone()
-    return row_to_dict(row)
-
-
-def current_open_trades_for_account(conn: sqlite3.Connection, analyst_id: int | None, account_type: str = "analyst") -> list[dict[str, Any]]:
-    condition, params = account_trade_filter(analyst_id, account_type, "vt")
-    rows = conn.execute(
-        f"""
-        SELECT vt.*, a.name AS analyst_name
-        FROM virtual_trades vt
-        LEFT JOIN analysts a ON a.id = vt.analyst_id
-        WHERE vt.status = 'open' AND {condition}
-        ORDER BY vt.opened_at DESC
-        """,
-        params,
-    ).fetchall()
-    return rows_to_dicts(rows)
-
-
-def account_initial_balance(conn: sqlite3.Connection) -> float:
-    return float(get_setting_value(conn, "account.initial_balance_usdt", 10000))
-
-
-def account_default_leverage(conn: sqlite3.Connection) -> float:
-    return max(1.0, float(get_setting_value(conn, "account.leverage", 2)))
-
-
-def account_market(conn: sqlite3.Connection) -> dict[str, Any]:
-    # 读取虚拟账户使用的行情交易对、周期和市场类型。
-    symbol = str(get_setting_value(conn, "market.symbol", "BTCUSDT"))
-    interval = str(get_setting_value(conn, "market.default_interval", "1h"))
-    market_type = str(get_setting_value(conn, "account.market_type", "perpetual"))
-    return latest_market(conn, symbol=symbol, interval=interval, market_type=market_type)
-
-
-def trade_notional(conn: sqlite3.Connection, trade: dict[str, Any]) -> float:
-    if trade.get("notional_usdt"):
-        return float(trade["notional_usdt"])
-    return float(trade["entry_price"]) * float(trade["size"])
-
-
-def trade_leverage(conn: sqlite3.Connection, trade: dict[str, Any]) -> float:
-    return max(1.0, float(trade.get("leverage") or account_default_leverage(conn)))
-
-
-def trade_margin(conn: sqlite3.Connection, trade: dict[str, Any]) -> float:
-    if trade.get("margin"):
-        return float(trade["margin"])
-    return trade_notional(conn, trade) / trade_leverage(conn, trade)
-
-
-def estimate_trade_funding_fee(conn: sqlite3.Connection, trade: dict[str, Any], market: dict[str, Any] | None = None) -> float:
-    # 按资金费率和持仓时间估算合约资金费用。
-    if not bool(get_setting_value(conn, "trade.funding_fee_enabled", True)):
-        return 0.0
-    market = market or account_market(conn)
-    funding_rate = float(market.get("funding_rate") or 0)
-    opened_at = parse_dt(str(trade.get("opened_at") or utc_now()))
-    elapsed_hours = max((parse_dt(utc_now()) - opened_at).total_seconds() / 3600, 0)
-    side_multiplier = 1 if trade.get("side") == "long" else -1
-    return trade_notional(conn, trade) * funding_rate * (elapsed_hours / 8) * side_multiplier
-
-
-def trade_unrealized_metrics(conn: sqlite3.Connection, trade: dict[str, Any], mark_price: float, market: dict[str, Any] | None = None) -> dict[str, Any]:
-    # 基于标记价格计算持仓浮动盈亏、预估平仓手续费和保证金信息。
-    size = float(trade["size"])
-    entry_price = float(trade["entry_price"])
-    if trade["side"] == "long":
-        gross = (mark_price - entry_price) * size
-    else:
-        gross = (entry_price - mark_price) * size
-    fee_rate = float(get_setting_value(conn, "trade.taker_fee_rate", 0.0005))
-    estimated_exit_fee = mark_price * size * fee_rate
-    funding_fee = estimate_trade_funding_fee(conn, trade, market)
-    unrealized_pnl = gross - estimated_exit_fee - funding_fee
-    notional = trade_notional(conn, trade)
-    leverage = trade_leverage(conn, trade)
-    return {
-        "notional_usdt": round(notional, 4),
-        "leverage": round(leverage, 4),
-        "margin": round(trade_margin(conn, trade), 4),
-        "gross_pnl": round(gross, 4),
-        "estimated_exit_fee": round(estimated_exit_fee, 4),
-        "funding_fee": round(funding_fee, 4),
-        "unrealized_pnl": round(unrealized_pnl, 4),
-        "mark_price": round(mark_price, 2),
-    }
-
-
-def account_state_for_analyst(
-    conn: sqlite3.Connection,
-    analyst_id: int | None,
-    analyst_name: str | None = None,
-    account_type: str = "analyst",
-) -> dict[str, Any]:
-    # 计算单个账户的权益、浮盈浮亏、手续费、回撤和持仓明细。
-    initial_balance = account_initial_balance(conn)
-    market = account_market(conn)
-    mark_price = float(market["close"])
-    condition, params = account_trade_filter(analyst_id, account_type)
-    closed = conn.execute(
-        f"""
-        SELECT
-            COALESCE(SUM(pnl), 0) AS realized_pnl,
-            COALESCE(SUM(fee), 0) AS fee_paid,
-            COALESCE(SUM(funding_fee), 0) AS funding_fee
-        FROM virtual_trades
-        WHERE status = 'closed' AND {condition}
-        """,
-        params,
-    ).fetchone()
-    open_fee = conn.execute(
-        f"SELECT COALESCE(SUM(fee), 0) AS fee FROM virtual_trades WHERE status = 'open' AND {condition}",
-        params,
-    ).fetchone()["fee"]
-    realized_pnl = float(closed["realized_pnl"] or 0)
-    wallet_balance = initial_balance + realized_pnl - float(open_fee or 0)
-    open_trades = current_open_trades_for_account(conn, analyst_id, account_type)
-    open_positions: list[dict[str, Any]] = []
-    unrealized_pnl = 0.0
-    open_funding_fee = 0.0
-    for open_trade in open_trades:
-        metrics = trade_unrealized_metrics(conn, open_trade, mark_price, market)
-        unrealized_pnl += float(metrics["unrealized_pnl"])
-        open_funding_fee += float(metrics["funding_fee"])
-        open_positions.append({
-            **open_trade,
-            **metrics,
-        })
-    equity = wallet_balance + unrealized_pnl
-    if account_type == "ai":
-        prior_max = conn.execute("SELECT MAX(max_equity) AS value FROM virtual_account_snapshots WHERE analyst_id IS NULL AND snapshot_type = 'ai'").fetchone()["value"]
-        prior_max_drawdown = conn.execute("SELECT MAX(drawdown) AS value FROM virtual_account_snapshots WHERE analyst_id IS NULL AND snapshot_type = 'ai'").fetchone()["value"]
-    elif analyst_id is None:
-        prior_max = conn.execute("SELECT MAX(max_equity) AS value FROM virtual_account_snapshots WHERE analyst_id IS NULL AND snapshot_type = 'unassigned'").fetchone()["value"]
-        prior_max_drawdown = conn.execute("SELECT MAX(drawdown) AS value FROM virtual_account_snapshots WHERE analyst_id IS NULL AND snapshot_type = 'unassigned'").fetchone()["value"]
-    else:
-        prior_max = conn.execute("SELECT MAX(max_equity) AS value FROM virtual_account_snapshots WHERE analyst_id = ? AND snapshot_type = 'analyst'", (analyst_id,)).fetchone()["value"]
-        prior_max_drawdown = conn.execute("SELECT MAX(drawdown) AS value FROM virtual_account_snapshots WHERE analyst_id = ? AND snapshot_type = 'analyst'", (analyst_id,)).fetchone()["value"]
-    max_equity = max(initial_balance, equity, float(prior_max or initial_balance))
-    drawdown = ((max_equity - equity) / max_equity * 100) if max_equity else 0
-    max_drawdown = max(float(prior_max_drawdown or 0), drawdown)
-    fee_paid = float(closed["fee_paid"] or 0) + float(open_fee or 0)
-    funding_fee = float(closed["funding_fee"] or 0) + open_funding_fee
-    return {
-        "snapshot_time": utc_now(),
-        "symbol": market["symbol"],
-        "market_type": market["market_type"],
-        "interval": market["interval"],
-        "analyst_id": analyst_id,
-        "analyst_name": analyst_name,
-        "account_type": account_type,
-        "initial_balance": round(initial_balance, 4),
-        "wallet_balance": round(wallet_balance, 4),
-        "equity": round(equity, 4),
-        "realized_pnl": round(realized_pnl, 4),
-        "unrealized_pnl": round(unrealized_pnl, 4),
-        "fee_paid": round(fee_paid, 4),
-        "funding_fee": round(funding_fee, 4),
-        "roi": round(((equity - initial_balance) / initial_balance * 100) if initial_balance else 0, 4),
-        "drawdown": round(drawdown, 4),
-        "max_drawdown": round(max_drawdown, 4),
-        "max_equity": round(max_equity, 4),
-        "mark_price": round(mark_price, 2),
-        "open_position": open_positions[0] if open_positions else None,
-        "open_positions": open_positions,
-    }
-
-
-def account_state(conn: sqlite3.Connection, analyst_id: int | None = None) -> dict[str, Any]:
-    # 无 analyst_id 时返回组合账户；有 analyst_id 时返回单分析师账户。
-    if analyst_id is not None:
-        analyst = conn.execute("SELECT id, name FROM analysts WHERE id = ?", (analyst_id,)).fetchone()
-        analyst_name = analyst["name"] if analyst else None
-        return account_state_for_analyst(conn, analyst_id, analyst_name)
-    analysts = account_scope_analysts(conn)
-    states = [account_state_for_analyst(conn, int(analyst["id"]), str(analyst["name"])) for analyst in analysts]
-    unassigned_count = conn.execute("SELECT COUNT(*) AS count FROM virtual_trades WHERE analyst_id IS NULL AND account_type = 'unassigned'").fetchone()["count"]
-    if not states or int(unassigned_count or 0) > 0:
-        states.append(account_state_for_analyst(conn, None, "未归属", "unassigned"))
-    if not states:
-        states.append(account_state_for_analyst(conn, None, "未归属", "unassigned"))
-    market = account_market(conn)
-    initial_balance = sum(float(item["initial_balance"]) for item in states)
-    wallet_balance = sum(float(item["wallet_balance"]) for item in states)
-    equity = sum(float(item["equity"]) for item in states)
-    realized_pnl = sum(float(item["realized_pnl"]) for item in states)
-    unrealized_pnl = sum(float(item["unrealized_pnl"]) for item in states)
-    fee_paid = sum(float(item["fee_paid"]) for item in states)
-    funding_fee = sum(float(item["funding_fee"]) for item in states)
-    open_positions = [position for item in states for position in item.get("open_positions", [])]
-    prior_max = conn.execute("SELECT MAX(max_equity) AS value FROM virtual_account_snapshots WHERE analyst_id IS NULL AND snapshot_type = 'aggregate'").fetchone()["value"]
-    max_equity = max(initial_balance, equity, float(prior_max or initial_balance))
-    drawdown = ((max_equity - equity) / max_equity * 100) if max_equity else 0
-    prior_max_drawdown = conn.execute("SELECT MAX(drawdown) AS value FROM virtual_account_snapshots WHERE analyst_id IS NULL AND snapshot_type = 'aggregate'").fetchone()["value"]
-    max_drawdown = max(float(prior_max_drawdown or 0), drawdown)
-    return {
-        "snapshot_time": utc_now(),
-        "symbol": market["symbol"],
-        "market_type": market["market_type"],
-        "interval": market["interval"],
-        "analyst_id": None,
-        "analyst_name": "组合账户",
-        "account_type": "aggregate",
-        "account_count": len(states),
-        "initial_balance": round(initial_balance, 4),
-        "wallet_balance": round(wallet_balance, 4),
-        "equity": round(equity, 4),
-        "realized_pnl": round(realized_pnl, 4),
-        "unrealized_pnl": round(unrealized_pnl, 4),
-        "fee_paid": round(fee_paid, 4),
-        "funding_fee": round(funding_fee, 4),
-        "roi": round(((equity - initial_balance) / initial_balance * 100) if initial_balance else 0, 4),
-        "drawdown": round(drawdown, 4),
-        "max_drawdown": round(max_drawdown, 4),
-        "max_equity": round(max_equity, 4),
-        "mark_price": round(float(market["close"]), 2),
-        "open_position": open_positions[0] if open_positions else None,
-        "open_positions": open_positions,
-        "analyst_accounts": states,
-    }
-
-
-def ai_account_state(conn: sqlite3.Connection) -> dict[str, Any]:
-    # AI 聚合账户状态额外附带当前聚合交易信号。
-    state = account_state_for_analyst(conn, None, "AI 聚合账户", "ai")
-    state["signal"] = build_ai_trade_signal(conn)
-    return state
-
-
-def insert_account_snapshot(conn: sqlite3.Connection, state: dict[str, Any], snapshot_analyst_id: int | None, snapshot_type: str) -> dict[str, Any]:
-    # 写入账户权益快照，并同步当前持仓的浮动盈亏字段。
-    positions = state.get("open_positions") or []
-    position = state.get("open_position") or {}
-    for item in positions:
-        conn.execute(
-            """
-            UPDATE virtual_trades
-            SET unrealized_pnl = ?, funding_fee = ?, notional_usdt = COALESCE(notional_usdt, ?), leverage = COALESCE(leverage, ?), margin = COALESCE(margin, ?)
-            WHERE id = ?
-            """,
-            (
-                item["unrealized_pnl"],
-                item["funding_fee"],
-                item["notional_usdt"],
-                item["leverage"],
-                item["margin"],
-                item["id"],
-            ),
-        )
-    if position:
-        position_size = float(position.get("size") or 0)
-        position_notional = float(position.get("notional_usdt") or 0)
-        position_margin = float(position.get("margin") or 0)
-        position_leverage = float(position.get("leverage") or account_default_leverage(conn))
-    else:
-        position_size = 0.0
-        position_notional = 0.0
-        position_margin = 0.0
-        position_leverage = account_default_leverage(conn)
-    cursor = conn.execute(
-        """
-        INSERT INTO virtual_account_snapshots (
-            analyst_id, snapshot_type, snapshot_time, symbol, market_type, interval, wallet_balance, equity,
-            initial_balance, realized_pnl, unrealized_pnl, fee_paid, funding_fee,
-            roi, drawdown, max_equity, open_trade_id, position_side, position_size,
-            notional_usdt, margin, leverage, entry_price, mark_price, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            snapshot_analyst_id,
-            snapshot_type,
-            state["snapshot_time"],
-            state["symbol"],
-            state["market_type"],
-            state["interval"],
-            state["wallet_balance"],
-            state["equity"],
-            state["initial_balance"],
-            state["realized_pnl"],
-            state["unrealized_pnl"],
-            state["fee_paid"],
-            state["funding_fee"],
-            state["roi"],
-            state["drawdown"],
-            state["max_equity"],
-            position.get("id"),
-            position.get("side"),
-            position_size,
-            position_notional,
-            position_margin,
-            position_leverage,
-            position.get("entry_price"),
-            state["mark_price"],
-            utc_now(),
-        ),
-    )
-    conn.commit()
-    state["snapshot_id"] = int(cursor.lastrowid)
-    return state
-
-
-def record_account_snapshot(conn: sqlite3.Connection, analyst_id: int | None = None) -> dict[str, Any]:
-    # 记录组合账户或指定分析师账户快照。
-    if analyst_id is not None:
-        return insert_account_snapshot(conn, account_state(conn, analyst_id), analyst_id, "analyst")
-    state = insert_account_snapshot(conn, account_state(conn), None, "aggregate")
-    analyst_snapshots: list[dict[str, Any]] = []
-    for analyst in account_scope_analysts(conn):
-        analyst_snapshots.append(insert_account_snapshot(conn, account_state(conn, int(analyst["id"])), int(analyst["id"]), "analyst"))
-    state["analyst_snapshots"] = analyst_snapshots
-    return state
-
-
-def record_ai_account_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
-    return insert_account_snapshot(conn, ai_account_state(conn), None, "ai")
-
-
-def account_summary(conn: sqlite3.Connection, analyst_id: int | None = None, account_type: str = "aggregate") -> dict[str, Any]:
-    if account_type == "ai":
-        return ai_account_state(conn)
-    return account_state(conn, analyst_id)
-
-
-def account_equity_curve(conn: sqlite3.Connection, limit: int = 300, analyst_id: int | None = None, account_type: str = "aggregate") -> list[dict[str, Any]]:
-    # 查询权益曲线；没有历史快照时返回当前账户状态作为兜底点。
-    if account_type == "ai":
-        where = "vas.analyst_id IS NULL AND vas.snapshot_type = 'ai'"
-        params: list[Any] = [limit]
-    elif analyst_id is None:
-        where = "vas.analyst_id IS NULL AND vas.snapshot_type = 'aggregate'"
-        params: list[Any] = [limit]
-    else:
-        where = "vas.analyst_id = ? AND vas.snapshot_type = 'analyst'"
-        params = [analyst_id, limit]
-    rows = conn.execute(
-        f"""
-        SELECT
-            vas.id, vas.analyst_id, a.name AS analyst_name, vas.snapshot_time,
-            vas.wallet_balance, vas.equity, vas.realized_pnl, vas.unrealized_pnl,
-            vas.fee_paid, vas.funding_fee, vas.roi, vas.drawdown, vas.max_equity, vas.mark_price,
-            vas.position_side, vas.position_size, vas.notional_usdt, vas.margin, vas.leverage
-        FROM virtual_account_snapshots vas
-        LEFT JOIN analysts a ON a.id = vas.analyst_id
-        WHERE {where}
-        ORDER BY snapshot_time DESC
-        LIMIT ?
-        """,
-        params,
-    ).fetchall()
-    items = list(reversed(rows_to_dicts(rows)))
-    if items:
-        return items
-    state = ai_account_state(conn) if account_type == "ai" else account_state(conn, analyst_id)
-    return [
-        {
-            "id": None,
-            "analyst_id": state.get("analyst_id"),
-            "analyst_name": state.get("analyst_name"),
-            "snapshot_time": state["snapshot_time"],
-            "wallet_balance": state["wallet_balance"],
-            "equity": state["equity"],
-            "realized_pnl": state["realized_pnl"],
-            "unrealized_pnl": state["unrealized_pnl"],
-            "fee_paid": state["fee_paid"],
-            "funding_fee": state["funding_fee"],
-            "roi": state["roi"],
-            "drawdown": state["drawdown"],
-            "max_equity": state["max_equity"],
-            "mark_price": state["mark_price"],
-            "position_side": state["open_position"]["side"] if state.get("open_position") else None,
-            "position_size": state["open_position"]["size"] if state.get("open_position") else 0,
-            "notional_usdt": state["open_position"]["notional_usdt"] if state.get("open_position") else 0,
-            "margin": state["open_position"]["margin"] if state.get("open_position") else 0,
-            "leverage": state["open_position"]["leverage"] if state.get("open_position") else account_default_leverage(conn),
-        }
-    ]
-
-
-def enrich_trade_for_account(conn: sqlite3.Connection, trade: dict[str, Any]) -> dict[str, Any]:
-    # 给交易记录补充名义仓位、杠杆、保证金和实时浮盈浮亏。
-    trade["notional_usdt"] = round(trade_notional(conn, trade), 4)
-    trade["leverage"] = round(trade_leverage(conn, trade), 4)
-    trade["margin"] = round(trade_margin(conn, trade), 4)
-    if trade.get("status") == "open":
-        market = account_market(conn)
-        metrics = trade_unrealized_metrics(conn, trade, float(market["close"]), market)
-        trade.update(metrics)
-        trade["pnl"] = metrics["unrealized_pnl"]
-    else:
-        trade["realized_pnl"] = float(trade.get("realized_pnl") or trade.get("pnl") or 0)
-        trade["unrealized_pnl"] = 0
-    return trade
-
-
-def list_trades(conn: sqlite3.Connection, limit: int = 100, analyst_id: int | None = None, account_type: str | None = None) -> list[dict[str, Any]]:
-    params: list[Any] = []
-    where = ""
-    conditions: list[str] = []
-    if account_type:
-        conditions.append("vt.account_type = ?")
-        params.append(account_type)
-    elif analyst_id is not None:
-        conditions.append("vt.analyst_id = ?")
-        conditions.append("vt.account_type = 'analyst'")
-        params.append(analyst_id)
-    if conditions:
-        where = f"WHERE {' AND '.join(conditions)}"
-    params.append(limit)
-    rows = conn.execute(
-        f"""
-        SELECT vt.*, a.name AS analyst_name, p.summary AS prediction_summary
-        FROM virtual_trades vt
-        LEFT JOIN analysts a ON a.id = vt.analyst_id
-        LEFT JOIN predictions p ON p.id = vt.prediction_id
-        {where}
-        ORDER BY vt.opened_at DESC
-        LIMIT ?
-        """,
-        params,
-    ).fetchall()
-    items = rows_to_dicts(rows)
-    return [enrich_trade_for_account(conn, item) for item in items]
 
 
 def pending_predictions_for_agent(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    # 读取 Agent 生成交易信号所需的待验证预测及分析师评分指标。
+    # 读取 Agent 生成方向分析所需的待验证预测及分析师评分指标。
     rows = conn.execute(
         """
         SELECT
@@ -1595,8 +1119,7 @@ def pending_predictions_for_agent(conn: sqlite3.Connection) -> list[dict[str, An
             a.direction_accuracy,
             a.target_accuracy,
             a.modification_rate,
-            a.stability_score,
-            a.virtual_roi
+            a.stability_score
         FROM predictions p
         JOIN analysts a ON a.id = p.analyst_id
         WHERE p.status = 'pending'
@@ -1677,12 +1200,10 @@ def recent_prediction_changes_for_report(conn: sqlite3.Connection, limit: int = 
 
 
 def daily_report_context(conn: sqlite3.Connection) -> dict[str, Any]:
-    # 汇总日报 Graph 需要的市场、预测、验证、改口、账户和 Top 分析师信息。
     market = market_summary(conn)
     active_predictions = pending_predictions_for_agent(conn)
     recent_verifications = recent_verification_results_for_report(conn)
     prediction_changes = recent_prediction_changes_for_report(conn)
-    account = account_summary(conn)
     top_analysts = [
         {
             "id": item.get("id"),
@@ -1701,14 +1222,6 @@ def daily_report_context(conn: sqlite3.Connection) -> dict[str, Any]:
         "active_predictions": active_predictions,
         "recent_verifications": recent_verifications,
         "prediction_changes": prediction_changes,
-        "account": {
-            "equity": account.get("equity"),
-            "roi": account.get("roi"),
-            "drawdown": account.get("drawdown"),
-            "max_drawdown": account.get("max_drawdown"),
-            "open_position_count": len(account.get("open_positions") or []),
-            "unrealized_pnl": account.get("unrealized_pnl"),
-        },
         "top_analysts": top_analysts,
     }
 
@@ -1757,21 +1270,15 @@ def score_predictions(predictions: list[dict[str, Any]], summary: dict[str, Any]
 
 
 def ai_prediction_weight(prediction: dict[str, Any], summary: dict[str, Any]) -> float:
-    # 综合分析师评分、历史准确率、稳定性、虚拟 ROI、置信度和周期计算预测权重。
     weight = max(0.25, min(float(prediction.get("total_score") or 50) / 100, 1.4))
     weighted_win_rate = float(prediction.get("weighted_win_rate") or 0)
     direction_accuracy = float(prediction.get("direction_accuracy") or 0)
     stability_score = float(prediction.get("stability_score") or 100)
     modification_rate = float(prediction.get("modification_rate") or 0)
-    virtual_roi = float(prediction.get("virtual_roi") or 0)
     accuracy_factor = 0.85 + min(max((weighted_win_rate + direction_accuracy) / 200, 0), 1) * 0.5
     weight *= accuracy_factor
     weight *= max(0.55, min(stability_score / 100, 1.15))
     weight *= max(0.55, 1 - min(modification_rate, 100) / 180)
-    if virtual_roi > 0:
-        weight *= 1 + min(virtual_roi, 60) / 300
-    elif virtual_roi < 0:
-        weight *= max(0.65, 1 + max(virtual_roi, -60) / 180)
     confidence = prediction.get("confidence")
     if confidence == "high":
         weight *= 1.22
@@ -1788,8 +1295,7 @@ def ai_prediction_weight(prediction: dict[str, Any], summary: dict[str, Any]) ->
     return max(0.0, weight)
 
 
-def build_ai_trade_signal(conn: sqlite3.Connection) -> dict[str, Any]:
-    # 根据所有待验证预测和当前行情，生成 AI 聚合账户的多空决策信号。
+def build_agent_analysis_signal(conn: sqlite3.Connection) -> dict[str, Any]:
     summary = market_summary(conn)
     predictions = pending_predictions_for_agent(conn)
     bull_score = 0.0
@@ -1825,28 +1331,24 @@ def build_ai_trade_signal(conn: sqlite3.Connection) -> dict[str, Any]:
     total_score = bull_score + bear_score
     threshold = max(0.55, total_score * 0.18)
     if difference >= threshold:
-        decision = "open_long"
-        direction = "long"
+        decision = "bullish"
+        direction = "bullish"
     elif difference <= -threshold:
-        decision = "open_short"
-        direction = "short"
+        decision = "bearish"
+        direction = "bearish"
     else:
         decision = "observe"
-        direction = "flat"
+        direction = "sideways"
     confidence_score = abs(difference) / total_score if total_score else 0
     confidence = "high" if confidence_score >= 0.35 else "medium" if confidence_score >= 0.18 else "low"
-    notional_base = float(get_setting_value(conn, "trade.notional_usdt", 1000))
-    notional_factor = 1.2 if confidence == "high" else 0.8 if confidence == "low" else 1.0
     risk_notes: list[str] = []
     if float(summary.get("volatility") or 0) >= 1.6:
-        risk_notes.append("波动率偏高，降低聚合账户仓位")
-        notional_factor *= 0.75
+        risk_notes.append("波动率偏高，需谨慎解读短线方向")
     if confidence == "low":
-        risk_notes.append("多空加权分差有限，AI 账户保持保守")
+        risk_notes.append("多空加权分差有限")
     if not predictions:
-        risk_notes.append("暂无有效交易员预测，AI 账户不交易")
-    open_positions = current_open_trades_for_account(conn, None, "ai")
-    supporting_direction = "bullish" if direction == "long" else "bearish" if direction == "short" else None
+        risk_notes.append("暂无有效分析师预测")
+    supporting_direction = direction if direction in {"bullish", "bearish"} else None
     supporting_predictions = [
         item for item in sorted(weighted_predictions, key=lambda value: float(value.get("weight") or 0), reverse=True)
         if supporting_direction is None or item.get("direction") == supporting_direction
@@ -1854,7 +1356,6 @@ def build_ai_trade_signal(conn: sqlite3.Connection) -> dict[str, Any]:
     return {
         "decision": decision,
         "direction": direction,
-        "should_execute": decision in {"open_long", "open_short"} and bool(predictions),
         "confidence": confidence,
         "confidence_score": round(confidence_score, 4),
         "bull_score": round(bull_score, 4),
@@ -1863,201 +1364,16 @@ def build_ai_trade_signal(conn: sqlite3.Connection) -> dict[str, Any]:
         "threshold": round(threshold, 4),
         "bull_count": bull_count,
         "bear_count": bear_count,
-        "position_notional": round(notional_base * notional_factor, 4),
         "risk_notes": risk_notes,
         "supporting_predictions": supporting_predictions,
-        "open_position_count": len(open_positions),
     }
 
 
 def run_agent(conn: sqlite3.Connection, trigger: str = "manual", focus_prediction_ids: list[int] | None = None) -> dict[str, Any]:
-    # 对外暴露的 Agent 运行入口，内部执行虚拟交易 Graph。
-    from .graphs import run_virtual_trade_signal_graph
+    from .graphs import run_agent_analysis_graph
 
-    state = run_virtual_trade_signal_graph(conn, trigger, focus_prediction_ids)
+    state = run_agent_analysis_graph(conn, trigger, focus_prediction_ids)
     return state.get("result", {})
-
-
-def close_trade(conn: sqlite3.Connection, trade: dict[str, Any], price: float, reason: str) -> float:
-    # 按当前价格平仓，计算手续费、资金费和最终已实现盈亏。
-    size = float(trade["size"])
-    entry_price = float(trade["entry_price"])
-    fee_rate = float(get_setting_value(conn, "trade.taker_fee_rate", 0.0005))
-    exit_fee = price * size * fee_rate
-    if trade["side"] == "long":
-        gross = (price - entry_price) * size
-    else:
-        gross = (entry_price - price) * size
-    funding_fee = estimate_trade_funding_fee(conn, trade)
-    total_fee = float(trade.get("fee") or 0) + exit_fee
-    pnl = gross - total_fee - funding_fee
-    analyst_id = int(trade["analyst_id"]) if trade.get("analyst_id") else None
-    account_type = str(trade.get("account_type") or ("analyst" if analyst_id is not None else "unassigned"))
-    closed_condition, closed_params = account_trade_filter(analyst_id, account_type)
-    closed_equity = account_initial_balance(conn) + float(
-        conn.execute(
-            f"SELECT COALESCE(SUM(pnl), 0) AS pnl FROM virtual_trades WHERE status = 'closed' AND {closed_condition}",
-            closed_params,
-        ).fetchone()["pnl"] or 0
-    ) + pnl
-    conn.execute(
-        """
-        UPDATE virtual_trades
-        SET exit_price = ?, fee = ?, funding_fee = ?, realized_pnl = ?, unrealized_pnl = 0,
-            pnl = ?, status = 'closed', reason = ?, closed_at = ?, closed_equity = ?, wallet_balance_after = ?
-        WHERE id = ?
-        """,
-        (
-            round(price, 2),
-            round(total_fee, 4),
-            round(funding_fee, 4),
-            round(pnl, 4),
-            round(pnl, 4),
-            reason,
-            utc_now(),
-            round(closed_equity, 4),
-            round(closed_equity, 4),
-            trade["id"],
-        ),
-    )
-    if trade.get("analyst_id"):
-        recompute_analyst_metrics(conn, int(trade["analyst_id"]))
-    if account_type == "ai":
-        record_ai_account_snapshot(conn)
-    elif analyst_id is not None:
-        record_account_snapshot(conn, analyst_id)
-    else:
-        record_account_snapshot(conn)
-    return pnl
-
-
-def execute_trade_decision(
-    conn: sqlite3.Connection,
-    agent_run_id: int,
-    decision: str,
-    focus_prediction: dict[str, Any] | None,
-    reason: str,
-) -> str:
-    # 旧版按单个分析师预测执行虚拟交易的规则入口。
-    market = account_market(conn)
-    price = float(market["close"])
-    target_side = "long" if decision == "open_long" else "short"
-    prediction_id = focus_prediction.get("id") if focus_prediction else None
-    analyst_id = int(focus_prediction["analyst_id"]) if focus_prediction and focus_prediction.get("analyst_id") else None
-    open_trades = current_open_trades_for_account(conn, analyst_id)
-    existing = open_trades[0] if open_trades else None
-    events: list[str] = []
-    if existing and existing["side"] == target_side:
-        snapshot = record_account_snapshot(conn, analyst_id) if analyst_id is not None else record_account_snapshot(conn)
-        account_name = snapshot.get("analyst_name") or "组合账户"
-        return f"{account_name}已有{('多' if target_side == 'long' else '空')}单，继续持有；账户权益 {snapshot['equity']} USDT"
-    if existing and existing["side"] != target_side:
-        pnl = close_trade(conn, existing, price, "Agent 观点反转，先平仓")
-        events.append(f"已平掉原{('多' if existing['side'] == 'long' else '空')}单，盈亏 {round(pnl, 2)} USDT")
-    notional = float(get_setting_value(conn, "trade.notional_usdt", 1000))
-    leverage = account_default_leverage(conn)
-    margin = notional / leverage
-    fee_rate = float(get_setting_value(conn, "trade.taker_fee_rate", 0.0005))
-    size = round(notional / price, 6)
-    fee = round(price * size * fee_rate, 4)
-    opened_equity = account_state(conn, analyst_id)["equity"] - fee
-    conn.execute(
-        """
-        INSERT INTO virtual_trades (
-            agent_run_id, prediction_id, analyst_id, account_type, action, side, size, entry_price,
-            notional_usdt, leverage, margin, fee, status, reason, opened_equity, opened_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
-        """,
-        (
-            agent_run_id,
-            prediction_id,
-            analyst_id,
-            "analyst" if analyst_id is not None else "unassigned",
-            decision,
-            target_side,
-            size,
-            round(price, 2),
-            round(notional, 4),
-            round(leverage, 4),
-            round(margin, 4),
-            fee,
-            reason,
-            round(opened_equity, 4),
-            utc_now(),
-        ),
-    )
-    if analyst_id:
-        recompute_analyst_metrics(conn, int(analyst_id))
-    snapshot = record_account_snapshot(conn, analyst_id) if analyst_id is not None else record_account_snapshot(conn)
-    account_name = snapshot.get("analyst_name") or "组合账户"
-    events.append(
-        f"{account_name}已开{('多' if target_side == 'long' else '空')}，名义仓位约 {round(notional, 2)} USDT，杠杆 {round(leverage, 2)}x，账户权益 {snapshot['equity']} USDT"
-    )
-    return "；".join(events)
-
-
-def execute_ai_trade_decision(
-    conn: sqlite3.Connection,
-    agent_run_id: int,
-    signal: dict[str, Any] | None,
-    reason: str,
-) -> str:
-    # 按 AI 聚合信号执行虚拟交易；同向持仓继续持有，反向信号先平后开。
-    signal = signal or build_ai_trade_signal(conn)
-    decision = str(signal.get("decision") or "observe")
-    if decision not in {"open_long", "open_short"} or not signal.get("should_execute"):
-        snapshot = record_ai_account_snapshot(conn)
-        return f"AI 聚合账户保持观望；账户权益 {snapshot['equity']} USDT"
-    market = account_market(conn)
-    price = float(market["close"])
-    target_side = "long" if decision == "open_long" else "short"
-    open_trades = current_open_trades_for_account(conn, None, "ai")
-    existing = open_trades[0] if open_trades else None
-    events: list[str] = []
-    if existing and existing["side"] == target_side:
-        snapshot = record_ai_account_snapshot(conn)
-        return f"AI 聚合账户已有{('多' if target_side == 'long' else '空')}单，继续持有；账户权益 {snapshot['equity']} USDT"
-    if existing and existing["side"] != target_side:
-        pnl = close_trade(conn, existing, price, "AI 聚合信号反转，先平仓")
-        events.append(f"AI 聚合账户已平掉原{('多' if existing['side'] == 'long' else '空')}单，盈亏 {round(pnl, 2)} USDT")
-    notional = max(0.0, float(signal.get("position_notional") or get_setting_value(conn, "trade.notional_usdt", 1000)))
-    leverage = account_default_leverage(conn)
-    margin = notional / leverage
-    fee_rate = float(get_setting_value(conn, "trade.taker_fee_rate", 0.0005))
-    size = round(notional / price, 6)
-    fee = round(price * size * fee_rate, 4)
-    supporting_predictions = signal.get("supporting_predictions") or []
-    prediction_id = supporting_predictions[0].get("id") if supporting_predictions else None
-    opened_equity = ai_account_state(conn)["equity"] - fee
-    signal_summary = f"AI 聚合信号：多头分 {signal.get('bull_score')}，空头分 {signal.get('bear_score')}，置信度 {signal.get('confidence')}。"
-    conn.execute(
-        """
-        INSERT INTO virtual_trades (
-            agent_run_id, prediction_id, analyst_id, account_type, action, side, size, entry_price,
-            notional_usdt, leverage, margin, fee, status, reason, opened_equity, opened_at
-        ) VALUES (?, ?, NULL, 'ai', ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
-        """,
-        (
-            agent_run_id,
-            prediction_id,
-            decision,
-            target_side,
-            size,
-            round(price, 2),
-            round(notional, 4),
-            round(leverage, 4),
-            round(margin, 4),
-            fee,
-            f"{signal_summary} {reason}",
-            round(opened_equity, 4),
-            utc_now(),
-        ),
-    )
-    snapshot = record_ai_account_snapshot(conn)
-    events.append(
-        f"AI 聚合账户已开{('多' if target_side == 'long' else '空')}，名义仓位约 {round(notional, 2)} USDT，杠杆 {round(leverage, 2)}x，账户权益 {snapshot['equity']} USDT"
-    )
-    return "；".join(events)
 
 
 def verify_due_predictions(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -2340,7 +1656,6 @@ def analyst_horizon_rate(rows: list[dict[str, Any]], horizon: str) -> float:
 
 
 def recompute_analyst_metrics(conn: sqlite3.Connection, analyst_id: int) -> None:
-    # 基于最新验证结果、改口率和虚拟交易收益重算分析师评分。
     predictions_stats = conn.execute(
         """
         SELECT
@@ -2374,14 +1689,6 @@ def recompute_analyst_metrics(conn: sqlite3.Connection, analyst_id: int) -> None
             (analyst_id,),
         ).fetchall()
     )
-    trade_stats = conn.execute(
-        """
-        SELECT COALESCE(SUM(pnl), 0) AS pnl
-        FROM virtual_trades
-        WHERE analyst_id = ? AND status = 'closed'
-        """,
-        (analyst_id,),
-    ).fetchone()
     verified = len(verification_rows)
     wins = sum(1 for item in verification_rows if float(item.get("final_score") or 0) >= 0.6)
     direction_wins = sum(1 for item in verification_rows if float(item.get("direction_score") or 0) >= 1)
@@ -2395,16 +1702,15 @@ def recompute_analyst_metrics(conn: sqlite3.Connection, analyst_id: int) -> None
     modified = int(predictions_stats["modified"] or 0)
     modification_rate = (modified / prediction_count * 100) if prediction_count else 0
     stability_score = max(0, 100 - modification_rate)
-    virtual_roi = float(trade_stats["pnl"] or 0) / 10000 * 100
     if verified:
-        score = weighted_win_rate * 0.45 + direction_win_rate * 0.2 + target_hit_rate * 0.15 + stability_score * 0.15 + max(min(virtual_roi, 30), -30) * 0.05
+        score = weighted_win_rate * 0.5 + direction_win_rate * 0.2 + target_hit_rate * 0.15 + stability_score * 0.15
     else:
-        score = 50 + stability_score * 0.1 + max(min(virtual_roi, 30), -30) * 0.1
+        score = 50 + stability_score * 0.1
     score = max(0, min(100, score))
     conn.execute(
         """
         UPDATE analysts
-        SET total_score = ?, direction_win_rate = ?, target_hit_rate = ?, stability_score = ?, virtual_roi = ?,
+        SET total_score = ?, direction_win_rate = ?, target_hit_rate = ?, stability_score = ?,
             hard_win_rate = ?, weighted_win_rate = ?, direction_accuracy = ?, target_accuracy = ?,
             modification_rate = ?, intraday_win_rate = ?, short_win_rate = ?, medium_win_rate = ?,
             long_win_rate = ?, average_prediction_score = ?, updated_at = ?
@@ -2415,7 +1721,6 @@ def recompute_analyst_metrics(conn: sqlite3.Connection, analyst_id: int) -> None
             round(direction_win_rate, 2),
             round(target_hit_rate, 2),
             round(stability_score, 2),
-            round(virtual_roi, 4),
             round(hard_win_rate, 2),
             round(weighted_win_rate, 2),
             round(direction_win_rate, 2),
@@ -2442,26 +1747,18 @@ def latest_agent_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
 
 
 def dashboard(conn: sqlite3.Connection) -> dict[str, Any]:
-    # 返回首页总览所需的市场、待验证预测、AI 账户和 Top 分析师数据。
     summary = market_summary(conn)
     pending_count = conn.execute("SELECT COUNT(*) AS count FROM predictions WHERE status = 'pending'").fetchone()["count"]
     due_count = conn.execute(
         "SELECT COUNT(*) AS count FROM predictions WHERE status = 'pending' AND verification_time <= ?",
         (utc_now(),),
     ).fetchone()["count"]
-    account = account_summary(conn)
-    ai_account = ai_account_state(conn)
-    open_trade = ai_account.get("open_position")
     analysts = list_analysts(conn)[:5]
     return {
         "market": summary,
         "pending_prediction_count": pending_count,
         "due_prediction_count": due_count,
         "latest_agent_run": latest_agent_run(conn),
-        "open_trade": open_trade,
-        "closed_pnl": ai_account["realized_pnl"],
-        "account": ai_account,
-        "aggregate_account": account,
         "top_analysts": analysts,
     }
 
@@ -2523,8 +1820,7 @@ def run_scheduled_market_sync(conn: sqlite3.Connection) -> dict[str, Any]:
     if isinstance(intervals, str):
         intervals = [item.strip() for item in intervals.split(",") if item.strip()]
     symbol = str(get_setting_value(conn, "market.symbol", "BTCUSDT"))
-    market_type = str(get_setting_value(conn, "account.market_type", "perpetual"))
-    return sync_market_intervals(conn, list(intervals), symbol=symbol, replace=False, market_type=market_type)
+    return sync_market_intervals(conn, list(intervals), symbol=symbol, replace=False, market_type="perpetual")
 
 
 def run_scheduled_verify_due(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -2533,12 +1829,6 @@ def run_scheduled_verify_due(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def run_scheduled_daily_report(conn: sqlite3.Connection) -> dict[str, Any]:
     return create_daily_report(conn)
-
-
-def run_scheduled_account_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
-    state = record_account_snapshot(conn)
-    state["ai_snapshot"] = record_ai_account_snapshot(conn)
-    return state
 
 
 def run_scheduled_task(conn: sqlite3.Connection, task_name: str) -> dict[str, Any]:
@@ -2550,8 +1840,6 @@ def run_scheduled_task(conn: sqlite3.Connection, task_name: str) -> dict[str, An
             result = run_scheduled_verify_due(conn)
         elif task_name == "daily_report":
             result = run_scheduled_daily_report(conn)
-        elif task_name == "account_snapshot":
-            result = run_scheduled_account_snapshot(conn)
         else:
             raise ValueError(f"unknown scheduled task: {task_name}")
     except Exception as exc:
@@ -2592,7 +1880,7 @@ def list_agent_node_runs(conn: sqlite3.Connection, agent_run_id: int) -> list[di
 def list_agent_stream_events(conn: sqlite3.Connection, after_id: int = 0, limit: int = 50) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT anr.*, ar.trigger, ar.decision, ar.risk, ar.should_execute
+        SELECT anr.*, ar.trigger, ar.decision, ar.risk
         FROM agent_node_runs anr
         LEFT JOIN agent_runs ar ON ar.id = anr.agent_run_id
         WHERE anr.id > ?
@@ -2608,7 +1896,7 @@ def list_agent_stream_events(conn: sqlite3.Connection, after_id: int = 0, limit:
         summary = ""
         if isinstance(data, dict):
             summary = (
-                data.get("trade_event")
+                data.get("analysis_event")
                 or data.get("decision_label")
                 or data.get("risk")
                 or data.get("market_summary")
@@ -2751,31 +2039,6 @@ def get_prediction_replay(conn: sqlite3.Connection, prediction_id: int) -> dict[
     for item in versions:
         item["reason"] = localize_display_payload(item.get("reason"))
         item["data"] = localize_display_payload(json.loads(item.get("payload") or "{}"))
-    trades = rows_to_dicts(
-        conn.execute(
-            """
-            SELECT vt.*, ar.trigger, ar.created_at AS agent_run_created_at
-            FROM virtual_trades vt
-            LEFT JOIN agent_runs ar ON ar.id = vt.agent_run_id
-            WHERE vt.prediction_id = ?
-            ORDER BY vt.opened_at DESC
-            """,
-            (prediction_id,),
-        ).fetchall()
-    )
-    agent_run_ids = [int(item["agent_run_id"]) for item in trades if item.get("agent_run_id")]
-    agent_runs: list[dict[str, Any]] = []
-    if agent_run_ids:
-        placeholders = ",".join("?" for _ in agent_run_ids)
-        agent_runs = rows_to_dicts(
-            conn.execute(
-                f"SELECT * FROM agent_runs WHERE id IN ({placeholders}) ORDER BY created_at DESC",
-                agent_run_ids,
-            ).fetchall()
-        )
-        for item in agent_runs:
-            item["input"] = json.loads(item.get("input_snapshot") or "{}")
-            item["output"] = json.loads(item.get("output_snapshot") or "{}")
     verification_result = get_verification_result(conn, prediction_id)
     verification_report = get_latest_verification_report(conn, prediction_id, verification_result)
     raw_opinion = {
@@ -2798,8 +2061,6 @@ def get_prediction_replay(conn: sqlite3.Connection, prediction_id: int) -> dict[
         "versions": versions,
         "verification_result": verification_result,
         "verification_report": verification_report,
-        "trades": trades,
-        "agent_runs": agent_runs,
     }
 
 
@@ -2843,13 +2104,9 @@ def get_analyst_replay(conn: sqlite3.Connection, analyst_id: int, limit: int = 5
     for item in predictions:
         item["verification_result"] = verification_map.get(int(item["id"]))
         item["version_count"] = version_count_map.get(int(item["id"]), 0)
-    analyst_trades = list_trades(conn, limit * 2, analyst_id)
     return {
         "analyst": analyst,
-        "account": account_summary(conn, analyst_id),
-        "equity_curve": account_equity_curve(conn, limit, analyst_id),
         "predictions": predictions,
-        "trades": analyst_trades,
     }
 
 
@@ -2861,19 +2118,6 @@ def get_agent_run_replay(conn: sqlite3.Connection, agent_run_id: int) -> dict[st
     agent_run["input"] = json.loads(agent_run.get("input_snapshot") or "{}")
     agent_run["output"] = json.loads(agent_run.get("output_snapshot") or "{}")
     nodes = list_agent_node_runs(conn, agent_run_id)
-    trades = rows_to_dicts(
-        conn.execute(
-            """
-            SELECT vt.*, a.name AS analyst_name, p.summary AS prediction_summary
-            FROM virtual_trades vt
-            LEFT JOIN analysts a ON a.id = vt.analyst_id
-            LEFT JOIN predictions p ON p.id = vt.prediction_id
-            WHERE vt.agent_run_id = ?
-            ORDER BY vt.opened_at DESC
-            """,
-            (agent_run_id,),
-        ).fetchall()
-    )
     focus_prediction_ids = list(agent_run.get("input", {}).get("focus_prediction_ids") or [])
     focus_predictions: list[dict[str, Any]] = []
     if focus_prediction_ids:
@@ -2887,7 +2131,6 @@ def get_agent_run_replay(conn: sqlite3.Connection, agent_run_id: int) -> dict[st
     return {
         "agent_run": agent_run,
         "nodes": nodes,
-        "trades": trades,
         "focus_predictions": focus_predictions,
     }
 

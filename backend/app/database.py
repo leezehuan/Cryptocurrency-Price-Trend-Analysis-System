@@ -55,17 +55,9 @@ DEFAULT_SETTINGS: dict[str, tuple[Any, str, str]] = {
     "prediction.target_change_threshold_pct": (0.03, "float", "观点变化检测目标价相对变化阈值"),
     "prediction.confidence_change_threshold_tiers": (2, "int", "观点变化检测置信度档位变化阈值"),
     "prediction.horizon_change_penalty_factor": (0.75, "float", "观点变化检测周期变化严重度因子"),
-    "account.initial_balance_usdt": (10000, "float", "合约虚拟账户初始权益"),
-    "account.leverage": (2, "float", "合约虚拟账户默认杠杆倍数"),
-    "account.market_type": ("perpetual", "str", "合约虚拟账户使用的行情类型"),
-    "account.snapshot_interval_minutes": (15, "int", "账户权益快照刷新间隔分钟数"),
-    "trade.notional_usdt": (1000, "float", "单次虚拟交易名义本金"),
-    "trade.taker_fee_rate": (0.0005, "float", "虚拟交易 taker 手续费率"),
-    "trade.funding_fee_enabled": (True, "bool", "是否按行情资金费率估算合约资金费"),
     "market.symbol": ("BTCUSDT", "str", "默认行情交易对"),
     "market.intervals": (["1m", "5m", "15m", "1h", "4h", "1d"], "json", "默认同步行情周期列表"),
     "market.default_interval": ("1h", "str", "默认展示行情周期"),
-    "scheduler.account_snapshot_minutes": (15, "int", "账户权益快照任务间隔分钟数"),
 }
 
 # PostgreSQL 包装层需要对这些表的 INSERT 自动追加 RETURNING id。
@@ -76,8 +68,6 @@ ID_TABLES = {
     "prediction_versions",
     "market_data",
     "indicators",
-    "virtual_trades",
-    "virtual_account_snapshots",
     "agent_runs",
     "agent_node_runs",
     "human_review_items",
@@ -361,46 +351,6 @@ def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {row["name"] for row in rows}
 
 
-def ensure_virtual_trade_columns(conn: sqlite3.Connection) -> None:
-    # 为历史数据库补齐虚拟交易账户字段。
-    existing = table_columns(conn, "virtual_trades")
-    columns: dict[str, str] = {
-        "account_type": "TEXT NOT NULL DEFAULT 'analyst'",
-        "notional_usdt": "REAL",
-        "leverage": "REAL",
-        "margin": "REAL",
-        "realized_pnl": "REAL NOT NULL DEFAULT 0",
-        "unrealized_pnl": "REAL NOT NULL DEFAULT 0",
-        "opened_equity": "REAL",
-        "closed_equity": "REAL",
-        "wallet_balance_after": "REAL",
-    }
-    for name, definition in columns.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE virtual_trades ADD COLUMN {name} {definition}")
-    conn.execute("UPDATE virtual_trades SET account_type = 'analyst' WHERE analyst_id IS NOT NULL AND (account_type IS NULL OR account_type = '')")
-    conn.execute("UPDATE virtual_trades SET account_type = 'unassigned' WHERE analyst_id IS NULL AND (account_type IS NULL OR account_type = '' OR account_type = 'analyst')")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_account_type_status ON virtual_trades(account_type, status)")
-    conn.commit()
-
-
-def ensure_virtual_account_snapshot_columns(conn: sqlite3.Connection) -> None:
-    # 为账户快照表补齐交易员账户和账户类型字段。
-    existing = table_columns(conn, "virtual_account_snapshots")
-    columns: dict[str, str] = {
-        "analyst_id": "INTEGER",
-        "snapshot_type": "TEXT NOT NULL DEFAULT 'aggregate'",
-    }
-    for name, definition in columns.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE virtual_account_snapshots ADD COLUMN {name} {definition}")
-    conn.execute("UPDATE virtual_account_snapshots SET snapshot_type = 'analyst' WHERE analyst_id IS NOT NULL AND snapshot_type = 'aggregate'")
-    conn.execute("UPDATE virtual_account_snapshots SET snapshot_type = 'unassigned' WHERE analyst_id IS NULL AND snapshot_type = 'analyst'")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_virtual_account_snapshots_analyst_time ON virtual_account_snapshots(analyst_id, snapshot_time)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_virtual_account_snapshots_type_time ON virtual_account_snapshots(snapshot_type, snapshot_time)")
-    conn.commit()
-
-
 def ensure_analyst_metric_columns(conn: sqlite3.Connection) -> None:
     # 为分析师评分体系补齐扩展指标字段。
     existing = table_columns(conn, "analysts")
@@ -459,6 +409,47 @@ def ensure_prediction_version_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def migrate_agent_runs_analysis_schema(conn: sqlite3.Connection) -> None:
+    legacy_execute_column = "should" + "_execute"
+    if legacy_execute_column not in table_columns(conn, "agent_runs"):
+        return
+    if database_backend() == "postgres":
+        conn.execute(f"ALTER TABLE agent_runs DROP COLUMN IF EXISTS {legacy_execute_column}")
+        conn.commit()
+        return
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("ALTER TABLE agent_runs RENAME TO agent_runs_old")
+    conn.execute(
+        """
+        CREATE TABLE agent_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger TEXT NOT NULL,
+            market_summary TEXT NOT NULL,
+            opinion_summary TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            risk TEXT NOT NULL,
+            input_snapshot TEXT NOT NULL,
+            output_snapshot TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO agent_runs (
+            id, trigger, market_summary, opinion_summary, decision, risk,
+            input_snapshot, output_snapshot, created_at
+        )
+        SELECT id, trigger, market_summary, opinion_summary, decision, risk,
+               input_snapshot, output_snapshot, created_at
+        FROM agent_runs_old
+        """
+    )
+    conn.execute("DROP TABLE agent_runs_old")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.commit()
+
+
 def init_db() -> None:
     # 创建所有业务表、索引，并执行必要的兼容迁移和种子数据写入。
     with connect() as conn:
@@ -472,7 +463,6 @@ def init_db() -> None:
                 direction_win_rate REAL NOT NULL DEFAULT 0,
                 target_hit_rate REAL NOT NULL DEFAULT 0,
                 stability_score REAL NOT NULL DEFAULT 100,
-                virtual_roi REAL NOT NULL DEFAULT 0,
                 hard_win_rate REAL NOT NULL DEFAULT 0,
                 weighted_win_rate REAL NOT NULL DEFAULT 0,
                 direction_accuracy REAL NOT NULL DEFAULT 0,
@@ -570,67 +560,6 @@ def init_db() -> None:
                 FOREIGN KEY (market_data_id) REFERENCES market_data(id)
             );
 
-            CREATE TABLE IF NOT EXISTS virtual_trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                agent_run_id INTEGER,
-                prediction_id INTEGER,
-                analyst_id INTEGER,
-                account_type TEXT NOT NULL DEFAULT 'analyst',
-                action TEXT NOT NULL,
-                side TEXT NOT NULL,
-                size REAL NOT NULL,
-                entry_price REAL NOT NULL,
-                exit_price REAL,
-                notional_usdt REAL,
-                leverage REAL,
-                margin REAL,
-                fee REAL NOT NULL DEFAULT 0,
-                funding_fee REAL NOT NULL DEFAULT 0,
-                realized_pnl REAL NOT NULL DEFAULT 0,
-                unrealized_pnl REAL NOT NULL DEFAULT 0,
-                pnl REAL NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'open',
-                reason TEXT NOT NULL,
-                opened_equity REAL,
-                closed_equity REAL,
-                wallet_balance_after REAL,
-                opened_at TEXT NOT NULL,
-                closed_at TEXT,
-                FOREIGN KEY (prediction_id) REFERENCES predictions(id),
-                FOREIGN KEY (analyst_id) REFERENCES analysts(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS virtual_account_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                analyst_id INTEGER,
-                snapshot_type TEXT NOT NULL DEFAULT 'aggregate',
-                snapshot_time TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                market_type TEXT NOT NULL,
-                interval TEXT NOT NULL,
-                wallet_balance REAL NOT NULL,
-                equity REAL NOT NULL,
-                initial_balance REAL NOT NULL,
-                realized_pnl REAL NOT NULL,
-                unrealized_pnl REAL NOT NULL,
-                fee_paid REAL NOT NULL,
-                funding_fee REAL NOT NULL,
-                roi REAL NOT NULL,
-                drawdown REAL NOT NULL,
-                max_equity REAL NOT NULL,
-                open_trade_id INTEGER,
-                position_side TEXT,
-                position_size REAL NOT NULL DEFAULT 0,
-                notional_usdt REAL NOT NULL DEFAULT 0,
-                margin REAL NOT NULL DEFAULT 0,
-                leverage REAL NOT NULL DEFAULT 1,
-                entry_price REAL,
-                mark_price REAL NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (analyst_id) REFERENCES analysts(id),
-                FOREIGN KEY (open_trade_id) REFERENCES virtual_trades(id)
-            );
-
             CREATE TABLE IF NOT EXISTS agent_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trigger TEXT NOT NULL,
@@ -638,7 +567,6 @@ def init_db() -> None:
                 opinion_summary TEXT NOT NULL,
                 decision TEXT NOT NULL,
                 risk TEXT NOT NULL,
-                should_execute INTEGER NOT NULL,
                 input_snapshot TEXT NOT NULL,
                 output_snapshot TEXT NOT NULL,
                 created_at TEXT NOT NULL
@@ -746,8 +674,6 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_predictions_analyst ON predictions(analyst_id);
             CREATE INDEX IF NOT EXISTS idx_market_data_time ON market_data(open_time);
             CREATE INDEX IF NOT EXISTS idx_market_data_symbol_interval_time ON market_data(symbol, market_type, interval, open_time);
-            CREATE INDEX IF NOT EXISTS idx_trades_status ON virtual_trades(status);
-            CREATE INDEX IF NOT EXISTS idx_virtual_account_snapshots_time ON virtual_account_snapshots(snapshot_time);
             CREATE INDEX IF NOT EXISTS idx_agent_node_runs_agent ON agent_node_runs(agent_run_id);
             CREATE INDEX IF NOT EXISTS idx_agent_node_runs_graph ON agent_node_runs(graph_name);
             CREATE INDEX IF NOT EXISTS idx_human_review_items_status ON human_review_items(status);
@@ -758,11 +684,10 @@ def init_db() -> None:
             """
         )
         migrate_market_data_unique_constraint(conn)
-        ensure_virtual_trade_columns(conn)
-        ensure_virtual_account_snapshot_columns(conn)
         ensure_analyst_metric_columns(conn)
         ensure_verification_result_columns(conn)
         ensure_prediction_version_columns(conn)
+        migrate_agent_runs_analysis_schema(conn)
         seed_default_settings(conn)
         conn.commit()
         seed_market_data(conn)
@@ -822,8 +747,6 @@ def clear_demo_data(conn: sqlite3.Connection, include_market: bool = False) -> N
     conn.execute("DELETE FROM verification_results")
     conn.execute("DELETE FROM verification_reports")
     conn.execute("DELETE FROM agent_reports")
-    conn.execute("DELETE FROM virtual_account_snapshots")
-    conn.execute("DELETE FROM virtual_trades")
     conn.execute("DELETE FROM prediction_versions")
     conn.execute("DELETE FROM agent_runs")
     conn.execute("DELETE FROM predictions")

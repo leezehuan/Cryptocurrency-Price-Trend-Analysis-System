@@ -15,8 +15,6 @@ from .llm_client import test_model_connection
 from .scheduler import scheduler_status, start_scheduler, stop_scheduler
 from .schemas import AgentRunCreate, MarketHistorySyncCreate, MarketIntervalsSyncCreate, OpinionCreate, PredictionManualUpdate, ReviewConfirmCreate, ReviewRejectCreate, SettingUpdate
 from .services import (
-    account_equity_curve,
-    account_summary,
     confirm_human_review,
     create_opinion,
     create_daily_report,
@@ -38,14 +36,11 @@ from .services import (
     list_reports,
     list_scheduled_task_runs,
     list_settings,
-    list_trades,
     list_verification_results,
     live_market_price,
     market_series,
     market_summary,
     reject_human_review,
-    record_ai_account_snapshot,
-    record_account_snapshot,
     reset_default_settings,
     resolve_human_review,
     run_agent,
@@ -213,50 +208,6 @@ def post_reset_default_settings(db: sqlite3.Connection = Depends(get_db)) -> dic
     return reset_default_settings(db)
 
 
-@app.get("/api/account")
-def get_account(
-    analyst_id: int | None = Query(default=None, ge=1),
-    db: sqlite3.Connection = Depends(get_db),
-) -> dict[str, object]:
-    # 查询交易员账户或聚合账户的当前虚拟权益状态。
-    return account_summary(db, analyst_id)
-
-
-@app.get("/api/account/ai")
-def get_ai_account(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
-    return account_summary(db, account_type="ai")
-
-
-@app.get("/api/account/equity-curve")
-def get_account_equity_curve(
-    limit: int = Query(default=300, ge=1, le=1000),
-    analyst_id: int | None = Query(default=None, ge=1),
-    db: sqlite3.Connection = Depends(get_db),
-) -> list[dict[str, object]]:
-    return account_equity_curve(db, limit, analyst_id)
-
-
-@app.get("/api/account/ai/equity-curve")
-def get_ai_account_equity_curve(
-    limit: int = Query(default=300, ge=1, le=1000),
-    db: sqlite3.Connection = Depends(get_db),
-) -> list[dict[str, object]]:
-    return account_equity_curve(db, limit, account_type="ai")
-
-
-@app.post("/api/account/snapshot")
-def post_account_snapshot(
-    analyst_id: int | None = Query(default=None, ge=1),
-    db: sqlite3.Connection = Depends(get_db),
-) -> dict[str, object]:
-    return record_account_snapshot(db, analyst_id)
-
-
-@app.post("/api/account/ai/snapshot")
-def post_ai_account_snapshot(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
-    return record_ai_account_snapshot(db)
-
-
 @app.post("/api/config/model/test")
 def post_test_model_connection() -> dict[str, object]:
     # 使用配置的模型服务执行一次最小化调用，验证模型连接。
@@ -407,16 +358,6 @@ def get_agent_run_nodes(agent_run_id: int, db: sqlite3.Connection = Depends(get_
 @app.get("/api/agent/runs/{agent_run_id}/replay")
 def get_agent_run_replay_view(agent_run_id: int, db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
     return get_agent_run_replay(db, agent_run_id)
-
-
-@app.get("/api/trades")
-def get_trades(
-    limit: int = Query(default=100, ge=1, le=300),
-    analyst_id: int | None = Query(default=None, ge=1),
-    account_type: str | None = Query(default=None),
-    db: sqlite3.Connection = Depends(get_db),
-) -> list[dict[str, object]]:
-    return list_trades(db, limit, analyst_id, account_type)
 
 
 @app.get("/api/reviews")

@@ -103,7 +103,6 @@ def start_scheduler() -> None:
     try:
         enabled = bool(get_setting_value(conn, "scheduler.enabled", False))
         market_sync_minutes = int(get_setting_value(conn, "scheduler.market_sync_minutes", 60))
-        account_snapshot_minutes = int(get_setting_value(conn, "scheduler.account_snapshot_minutes", 15))
         daily_report_hour = int(get_setting_value(conn, "scheduler.daily_report_hour", 8))
     finally:
         conn.close()
@@ -111,7 +110,6 @@ def start_scheduler() -> None:
     _scheduler = scheduler
     if enabled:
         scheduler.add_job(_run_task, "interval", minutes=max(1, market_sync_minutes), args=["market_sync"], id="market_sync", replace_existing=True)
-        scheduler.add_job(_run_task, "interval", minutes=max(1, account_snapshot_minutes), args=["account_snapshot"], id="account_snapshot", replace_existing=True)
         scheduler.add_job(_run_task, "cron", hour=max(0, min(23, daily_report_hour)), minute=0, args=["daily_report"], id="daily_report", replace_existing=True)
     schedule_next_due_verification()
     scheduler.start()

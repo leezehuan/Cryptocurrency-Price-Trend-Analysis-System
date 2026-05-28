@@ -57,7 +57,7 @@
           "- 条件判断",
           "- 风险提示",
           "- 失效条件",
-          "- 仓位或交易计划描述",
+          "- 操作计划描述",
           "",
           "【输出】",
           "请输出标准 JSON，data 字段包含：cleaned_text、removed_noise_summary、has_price_view、language。"
@@ -85,7 +85,7 @@
           "- 支撑压力",
           "- 趋势判断",
           "- 时间周期",
-          "- 交易计划",
+          "- 操作计划",
           "",
           "不算有效预测的内容：",
           "- 单纯新闻",
@@ -98,12 +98,12 @@
           "- 如果同时提到 BTC 和其他币，只提取 BTC 相关内容。",
           "",
           "【输出】",
-          "请输出标准 JSON，data 字段包含：is_btc_related、contains_price_prediction、contains_trade_plan、contains_market_commentary_only、btc_relevant_text、irrelevant_assets、reason。"
+          "请输出标准 JSON，data 字段包含：is_btc_related、contains_price_prediction、contains_action_plan、contains_market_commentary_only、btc_relevant_text、irrelevant_assets、reason。"
         ],
         "output_schema": {
           "is_btc_related": true,
           "contains_price_prediction": true,
-          "contains_trade_plan": true,
+          "contains_action_plan": true,
           "contains_market_commentary_only": false,
           "btc_relevant_text": "string",
           "irrelevant_assets": [],
@@ -708,8 +708,8 @@
           "近期预测表现：",
           "{recent_predictions}",
           "",
-          "虚拟交易表现：",
-          "{virtual_trading_metrics}",
+          "近期验证表现：",
+          "{recent_verification_metrics}",
           "",
           "【任务】",
           "根据系统统计结果生成分析师能力画像。",
@@ -791,79 +791,41 @@
         }
       }
     },
-    "virtual_trade": {
-      "trade_signal_explanation": {
+    "agent_analysis": {
+      "analysis_explanation": {
         "system": [
-          "你负责解释系统根据分析师预测生成的虚拟合约交易信号。不得建议真实交易，不得改变系统交易动作。"
+          "你负责解释系统根据分析师预测生成的市场方向分析。不得建议真实交易，不得创建交易动作。"
         ],
         "user_template": [
           "【输入】",
           "分析师预测：",
           "{prediction}",
           "",
-          "系统交易规则：",
-          "{trading_rules}",
+          "分析规则：",
+          "{analysis_rules}",
           "",
-          "生成的虚拟交易信号：",
-          "{trade_signal}",
+          "生成的分析信号：",
+          "{analysis_signal}",
           "",
           "市场摘要：",
           "{market_summary}",
           "",
           "【任务】",
-          "解释虚拟交易信号如何产生。",
+          "解释方向分析结论如何产生。",
           "",
           "【规则】",
-          "- 不得改变系统交易动作。",
           "- 不得建议真实交易。",
-          "- 需要说明开仓、持有、反手或观望的逻辑。",
+          "- 不得描述开仓、平仓、反手或账户操作。",
+          "- 需要说明偏多、偏空或观望的依据。",
           "",
           "【输出】",
-          "请输出标准 JSON，data 字段包含：signal_explanation、position_logic、exit_logic、risk_notes。"
+          "请输出标准 JSON，data 字段包含：analysis_summary、consensus_logic、action_scope、risk_notes。"
         ],
         "output_schema": {
-          "signal_explanation": "string",
-          "position_logic": "string",
-          "exit_logic": "string",
+          "analysis_summary": "string",
+          "consensus_logic": "string",
+          "action_scope": "string",
           "risk_notes": []
-        }
-      },
-      "trade_review": {
-        "system": [
-          "你负责复盘某个分析师的一笔虚拟合约交易。不得修改交易结果，不得给出真实交易建议。"
-        ],
-        "user_template": [
-          "【输入】",
-          "交易记录：",
-          "{trade_record}",
-          "",
-          "对应预测：",
-          "{prediction}",
-          "",
-          "行情过程：",
-          "{market_path_summary}",
-          "",
-          "手续费与资金费率：",
-          "{fee_and_funding_summary}",
-          "",
-          "【任务】",
-          "复盘这笔虚拟交易的表现。",
-          "",
-          "【规则】",
-          "- 不得修改交易结果。",
-          "- 不得给出真实交易建议。",
-          "- 需要区分预测有效性、行情路径和成本影响。",
-          "",
-          "【输出】",
-          "请输出标准 JSON，data 字段包含：trade_review_summary、what_worked、what_failed、cost_impact、risk_review、tags。"
-        ],
-        "output_schema": {
-          "trade_review_summary": "string",
-          "what_worked": [],
-          "what_failed": [],
-          "cost_impact": "string",
-          "risk_review": "string",
-          "tags": []
         }
       },
       "display_translation": {

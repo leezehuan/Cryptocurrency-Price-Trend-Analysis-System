@@ -37,7 +37,6 @@ DISPLAY_TEXT_SKIP_KEYS = {
     "confidence",
     "status",
     "decision",
-    "should_execute",
     "created_at",
     "updated_at",
     "verification_time",
@@ -144,7 +143,7 @@ def collect_display_payload(state: dict[str, Any]) -> dict[str, Any]:
         "signal": state.get("signal", {}),
         "risk": state.get("risk"),
         "decision_label": state.get("decision_label"),
-        "trade_signal_explanation": output_data(state, "trade_signal_explanation"),
+        "analysis_explanation": output_data(state, "agent_analysis_explanation"),
         "verification_explanation": output_data(state, "verification_explanation"),
         "failure_reason": output_data(state, "failure_reason"),
         "report": state.get("report", {}),
@@ -171,7 +170,7 @@ def apply_display_payload(state: dict[str, Any], payload: dict[str, Any]) -> Non
         state["decision_label"] = payload["decision_label"]
     if payload.get("report"):
         state["report"] = payload["report"]
-    for node_name in ("trade_signal_explanation", "verification_explanation", "failure_reason"):
+    for node_name in ("agent_analysis_explanation", "verification_explanation", "failure_reason"):
         if node_name in payload:
             replace_node_data(state, node_name, payload[node_name])
 
@@ -371,7 +370,7 @@ def btc_relevance_node(state: dict[str, Any]) -> dict[str, Any]:
     fallback = {
         "is_btc_related": "btc" in lower or "比特币" in lower or "大饼" in lower or True,
         "contains_price_prediction": True,
-        "contains_trade_plan": False,
+        "contains_action_plan": False,
         "contains_market_commentary_only": False,
         "btc_relevant_text": cleaned_text,
         "irrelevant_assets": [],
@@ -585,26 +584,24 @@ def persist_opinion_node(state: dict[str, Any]) -> dict[str, Any]:
     return apply_node_output(state, "persist_opinion", output, {"prediction_ids": created.get("prediction_ids", [])})
 
 
-def load_trade_context_node(state: dict[str, Any]) -> dict[str, Any]:
+def load_agent_analysis_context_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
-    # 加载行情摘要和待验证预测，作为虚拟交易信号输入。
     summary = rules.market_summary(state["conn"])
     predictions = rules.pending_predictions_for_agent(state["conn"])
     state["market"] = summary
     state["pending_predictions"] = predictions
-    output = standard_node_output("load_trade_context", {"market": summary, "pending_prediction_count": len(predictions)})
-    return apply_node_output(state, "load_trade_context", output, {"focus_prediction_ids": state.get("focus_prediction_ids", [])})
+    output = standard_node_output("load_agent_analysis_context", {"market": summary, "pending_prediction_count": len(predictions)})
+    return apply_node_output(state, "load_agent_analysis_context", output, {"focus_prediction_ids": state.get("focus_prediction_ids", [])})
 
 
-def rule_based_signal_scoring_node(state: dict[str, Any]) -> dict[str, Any]:
+def rule_based_consensus_scoring_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
-    # 使用规则模型计算 AI 聚合账户的多空加权分。
-    signal = rules.build_ai_trade_signal(state["conn"])
+    signal = rules.build_agent_analysis_signal(state["conn"])
     state["signal"] = signal
-    output = standard_node_output("rule_based_signal_scoring", signal)
-    return apply_node_output(state, "rule_based_signal_scoring", output, {"market": state["market"], "predictions": state.get("pending_predictions", [])})
+    output = standard_node_output("rule_based_consensus_scoring", signal)
+    return apply_node_output(state, "rule_based_consensus_scoring", output, {"market": state["market"], "predictions": state.get("pending_predictions", [])})
 
 
 def risk_rule_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -615,57 +612,51 @@ def risk_rule_node(state: dict[str, Any]) -> dict[str, Any]:
     difference = signal["bull_score"] - signal["bear_score"]
     risk_parts: list[str] = []
     if summary["volatility"] >= 1.6:
-        risk_parts.append("波动率偏高，建议降低仓位")
+        risk_parts.append("波动率偏高，短线结论需谨慎")
     if abs(difference) < 0.35 and predictions:
-        risk_parts.append("多空观点接近，信号存在冲突")
+        risk_parts.append("多空观点接近，方向共识不强")
     if not predictions:
         risk_parts.append("暂无待验证观点，Agent 只记录行情判断")
-    risk = "；".join(risk_parts) if risk_parts else "风险正常，按轻仓模拟"
+    risk = "；".join(risk_parts) if risk_parts else "风险正常，仅记录分析判断"
     state["risk"] = risk
     output = standard_node_output("risk_rule", {"risk": risk, "difference": round(difference, 3)})
     return apply_node_output(state, "risk_rule", output, {"signal": signal})
 
 
-def trade_decision_rule_node(state: dict[str, Any]) -> dict[str, Any]:
-    from . import services as rules
-
-    # 将交易信号转换成开多、开空或观望决策。
+def analysis_decision_rule_node(state: dict[str, Any]) -> dict[str, Any]:
     signal = state["signal"]
     decision = signal.get("decision", "observe")
-    decision_label = {"open_long": "开多", "open_short": "开空", "observe": "观望"}.get(decision, str(decision))
-    should_execute = bool(signal.get("should_execute"))
+    decision_label = {"bullish": "偏多", "bearish": "偏空", "observe": "观望"}.get(decision, str(decision))
     focus = (signal.get("supporting_predictions") or [None])[0]
     state["decision"] = decision
     state["decision_label"] = decision_label
-    state["should_execute"] = should_execute
     state["focus_prediction"] = focus
     output = standard_node_output(
-        "trade_decision_rule",
-        {"decision": decision, "decision_label": decision_label, "should_execute": should_execute, "focus_prediction": focus},
+        "analysis_decision_rule",
+        {"decision": decision, "decision_label": decision_label, "focus_prediction": focus},
     )
-    return apply_node_output(state, "trade_decision_rule", output, {"signal": signal})
+    return apply_node_output(state, "analysis_decision_rule", output, {"signal": signal})
 
 
-def trade_signal_explanation_node(state: dict[str, Any]) -> dict[str, Any]:
+def agent_analysis_explanation_node(state: dict[str, Any]) -> dict[str, Any]:
     fallback = {
-        "signal_explanation": f"规则信号：多头分 {state['signal']['bull_score']}，空头分 {state['signal']['bear_score']}，决策为 {state['decision_label']}。",
-        "position_logic": "AI 账户根据所有交易员预测、评分、置信度、周期和市场趋势聚合出虚拟交易信号。",
-        "exit_logic": "出现反向信号时先平旧仓，再按规则开新仓。",
+        "analysis_summary": f"规则分析：多头分 {state['signal']['bull_score']}，空头分 {state['signal']['bear_score']}，结论为 {state['decision_label']}。",
+        "consensus_logic": "Agent 根据待验证预测、分析师评分、置信度、周期和市场趋势生成方向共识。",
+        "action_scope": "仅记录分析结论，不创建任何账户或执行记录。",
         "risk_notes": [state.get("risk", "")],
     }
     values = {
         "prediction": state.get("focus_prediction"),
-        "trading_rules": "AI 聚合账户按加权多空分、置信度与波动率决定方向和名义仓位，信号不足时观望。",
-        "trade_signal": {
+        "analysis_rules": "Agent 按加权多空分、置信度与波动率生成方向结论，分差不足时观望。",
+        "analysis_signal": {
             "signal": state.get("signal"),
             "decision": state.get("decision"),
-            "should_execute": state.get("should_execute"),
             "risk": state.get("risk"),
         },
         "market_summary": state.get("market"),
     }
-    output = llm_or_fallback(state, "virtual_trade", "trade_signal_explanation", values, fallback)
-    return apply_node_output(state, "trade_signal_explanation", output, values)
+    output = llm_or_fallback(state, "agent_analysis", "analysis_explanation", values, fallback)
+    return apply_node_output(state, "agent_analysis_explanation", output, values)
 
 
 def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -679,7 +670,7 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
         "market": summary,
         "pending_predictions": state.get("pending_predictions", [])[:12],
         "focus_prediction_ids": state.get("focus_prediction_ids", []),
-        "graph": "virtual_trade",
+        "graph": "agent_analysis",
         "node_outputs": state.get("node_outputs", {}),
     }
     output_snapshot = {
@@ -687,15 +678,14 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
         "decision_label": state["decision_label"],
         "risk": state["risk"],
         "signal": signal,
-        "should_execute": state["should_execute"],
-        "trade_signal_explanation": output_data(state, "trade_signal_explanation"),
+        "analysis_explanation": output_data(state, "agent_analysis_explanation"),
     }
     cursor = conn.execute(
         """
         INSERT INTO agent_runs (
-            trigger, market_summary, opinion_summary, decision, risk, should_execute,
+            trigger, market_summary, opinion_summary, decision, risk,
             input_snapshot, output_snapshot, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             state.get("trigger", "manual"),
@@ -703,7 +693,6 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
             opinion_summary,
             state["decision"],
             state["risk"],
-            1 if state["should_execute"] else 0,
             as_json(input_snapshot),
             as_json(output_snapshot),
             utc_now(),
@@ -726,21 +715,16 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
     return apply_node_output(state, "persist_agent_run", output, input_snapshot)
 
 
-def execute_virtual_trade_rule_node(state: dict[str, Any]) -> dict[str, Any]:
-    from . import services as rules
-
-    # 根据 Agent 决策执行 AI 聚合账户的虚拟交易，并更新运行输出。
-    market_text = output_data(state, "persist_agent_run").get("market_summary", "")
-    trade_event = rules.execute_ai_trade_decision(state["conn"], int(state["agent_run_id"]), state.get("signal"), market_text)
-    state["trade_event"] = trade_event
+def finalize_agent_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
+    analysis_event = "Agent 分析已记录，未创建任何交易或账户记录。"
+    state["analysis_event"] = analysis_event
     output_snapshot = {
         "decision": state["decision"],
         "decision_label": state["decision_label"],
         "risk": state["risk"],
         "signal": state["signal"],
-        "should_execute": state["should_execute"],
-        "trade_event": trade_event,
-        "trade_signal_explanation": output_data(state, "trade_signal_explanation"),
+        "analysis_event": analysis_event,
+        "analysis_explanation": output_data(state, "agent_analysis_explanation"),
     }
     state["conn"].execute("UPDATE agent_runs SET output_snapshot = ? WHERE id = ?", (as_json(output_snapshot), state["agent_run_id"]))
     state["conn"].commit()
@@ -748,8 +732,8 @@ def execute_virtual_trade_rule_node(state: dict[str, Any]) -> dict[str, Any]:
     result = row_to_dict(row) or {}
     result["output"] = output_snapshot
     state["result"] = result
-    output = standard_node_output("execute_virtual_trade_rule", {"trade_event": trade_event})
-    return apply_node_output(state, "execute_virtual_trade_rule", output, {"agent_run_id": state.get("agent_run_id")})
+    output = standard_node_output("finalize_agent_analysis", {"analysis_event": analysis_event})
+    return apply_node_output(state, "finalize_agent_analysis", output, {"agent_run_id": state.get("agent_run_id")})
 
 
 def load_due_predictions_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -905,7 +889,6 @@ def report_weighted_consensus(predictions: list[dict[str, Any]]) -> dict[str, An
 def load_daily_report_context_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
-    # 汇总日报所需的行情、预测、验证、改口和账户上下文。
     context = rules.daily_report_context(state["conn"])
     market = context["market"]
     predictions = context["active_predictions"]
@@ -913,7 +896,6 @@ def load_daily_report_context_node(state: dict[str, Any]) -> dict[str, Any]:
     state["active_predictions"] = predictions
     state["recent_verifications"] = context["recent_verifications"]
     state["prediction_changes"] = context["prediction_changes"]
-    state["account"] = context["account"]
     state["top_analysts"] = context["top_analysts"]
     state["report_context"] = context
     output = standard_node_output(
@@ -923,7 +905,6 @@ def load_daily_report_context_node(state: dict[str, Any]) -> dict[str, Any]:
             "active_prediction_count": len(predictions),
             "recent_verification_count": len(context["recent_verifications"]),
             "prediction_change_count": len(context["prediction_changes"]),
-            "account": context["account"],
         },
     )
     return apply_node_output(state, "load_daily_report_context", output, {})
@@ -1061,7 +1042,6 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
         "recent_verification_count": len(recent_verifications),
         "prediction_change_count": len(prediction_changes),
         "change_distribution": change_distribution,
-        "account_snapshot": state.get("account", {}),
         "top_analysts": state.get("top_analysts", []),
         "recent_verifications": recent_verifications,
         "prediction_changes": prediction_changes,
@@ -1073,7 +1053,7 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
         state,
         "daily_report",
         "daily_report",
-        {"market_summary": market_summary_data, "indicator_summary": state["market"], "consensus_summary": consensus, "scenario_analysis": scenarios, "recent_verification_results": recent_verifications, "prediction_changes": prediction_changes, "account_snapshot": state.get("account", {})},
+        {"market_summary": market_summary_data, "indicator_summary": state["market"], "consensus_summary": consensus, "scenario_analysis": scenarios, "recent_verification_results": recent_verifications, "prediction_changes": prediction_changes},
         fallback,
     )
     report = {**fallback, **(output.get("data") or {})}

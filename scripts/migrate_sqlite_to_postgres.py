@@ -20,8 +20,6 @@ TABLES = [
     "prediction_versions",
     "market_data",
     "indicators",
-    "virtual_trades",
-    "virtual_account_snapshots",
     "agent_runs",
     "agent_node_runs",
     "human_review_items",
@@ -75,17 +73,6 @@ def reset_sequence(conn: Any, table: str) -> None:
     )
 
 
-def normalize_snapshot_types(conn: Any) -> None:
-    conn.execute(
-        """
-        UPDATE virtual_account_snapshots
-        SET snapshot_type = 'analyst'
-        WHERE analyst_id IS NOT NULL
-          AND (snapshot_type IS NULL OR snapshot_type = 'aggregate')
-        """
-    )
-
-
 def migrate(sqlite_path: Path) -> None:
     if "DATABASE_URL" not in os.environ and "POSTGRES_DSN" not in os.environ:
         raise RuntimeError("请先设置 DATABASE_URL 或 POSTGRES_DSN，避免误把 SQLite 源库作为迁移目标。")
@@ -114,8 +101,6 @@ def migrate(sqlite_path: Path) -> None:
             values = [tuple(row[column] for column in columns) for row in rows]
             conn.executemany(query, values)
             print(f"{table}: {len(rows)}")
-        conn.commit()
-        normalize_snapshot_types(conn)
         conn.commit()
         for table in SEQUENCE_TABLES:
             reset_sequence(conn, table)

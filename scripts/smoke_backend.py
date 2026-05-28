@@ -18,15 +18,9 @@ GET_ENDPOINTS = [
     "/api/market/summary?interval=1h",
     "/api/market/live-price",
     "/api/settings",
-    "/api/account",
-    "/api/account/ai",
-    "/api/account/equity-curve?limit=5",
-    "/api/account/ai/equity-curve?limit=5",
     "/api/analysts",
     "/api/opinions",
     "/api/predictions",
-    "/api/trades",
-    "/api/trades?account_type=ai",
     "/api/agent/runs",
     "/api/agent/stream-events?limit=5",
     "/api/reviews?status=pending",
@@ -38,9 +32,6 @@ GET_ENDPOINTS = [
 
 POST_ENDPOINTS = [
     "/api/predictions/verify-due",
-    "/api/account/snapshot",
-    "/api/account/ai/snapshot",
-    "/api/scheduler/tasks/account_snapshot/run",
 ]
 
 
@@ -54,15 +45,6 @@ def main() -> None:
     client = TestClient(app)
     analysts_response = client.get("/api/analysts")
     assert_ok("/api/analysts", analysts_response.status_code)
-    analysts = analysts_response.json()
-    analyst_id = analysts[0]["id"] if analysts else None
-    if analyst_id:
-        GET_ENDPOINTS.extend([
-            f"/api/account?analyst_id={analyst_id}",
-            f"/api/account/equity-curve?limit=5&analyst_id={analyst_id}",
-            f"/api/trades?analyst_id={analyst_id}",
-        ])
-        POST_ENDPOINTS.insert(1, f"/api/account/snapshot?analyst_id={analyst_id}")
     for path in GET_ENDPOINTS:
         response = client.get(path)
         assert_ok(path, response.status_code)

@@ -38,7 +38,7 @@ class OpinionIngestionState(BaseGraphState):
     result: NotRequired[dict[str, Any]]
 
 
-class TradeSignalState(BaseGraphState):
+class AgentAnalysisState(BaseGraphState):
     focus_prediction_ids: NotRequired[list[int]]
     market: NotRequired[dict[str, Any]]
     pending_predictions: NotRequired[list[dict[str, Any]]]
@@ -46,9 +46,8 @@ class TradeSignalState(BaseGraphState):
     decision: NotRequired[str]
     decision_label: NotRequired[str]
     risk: NotRequired[str]
-    should_execute: NotRequired[bool]
     focus_prediction: NotRequired[dict[str, Any] | None]
-    trade_event: NotRequired[str]
+    analysis_event: NotRequired[str]
     result: NotRequired[dict[str, Any]]
 
 

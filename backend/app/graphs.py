@@ -4,26 +4,28 @@ import sqlite3
 from typing import Any, Callable
 
 from .graph_nodes import (
+    agent_analysis_explanation_node,
     analyst_consensus_node,
     analyst_identification_node,
+    analysis_decision_rule_node,
     btc_relevance_node,
     confidence_parsing_node,
     daily_report_node,
     data_anomaly_check_node,
     display_translation_node,
-    execute_virtual_trade_rule_node,
     failure_reason_node,
+    finalize_agent_analysis_node,
     human_confirmation_decision_node,
+    load_agent_analysis_context_node,
     load_daily_report_context_node,
     load_due_predictions_node,
-    load_trade_context_node,
     opinion_summary_node,
     persist_agent_run_node,
     persist_opinion_node,
     prediction_extraction_node,
     publish_time_extraction_node,
     report_market_summary_node,
-    rule_based_signal_scoring_node,
+    rule_based_consensus_scoring_node,
     rule_based_verification_node,
     risk_rule_node,
     save_daily_report_node,
@@ -31,8 +33,6 @@ from .graph_nodes import (
     scenario_analysis_node,
     text_cleaning_node,
     time_normalization_node,
-    trade_decision_rule_node,
-    trade_signal_explanation_node,
     verification_explanation_node,
 )
 
@@ -60,16 +60,16 @@ OPINION_INGESTION_NODES: list[tuple[str, NodeFn]] = [
     ("persist_opinion", persist_opinion_node),
 ]
 
-# 虚拟交易流程：加载行情和待验证预测，生成交易信号、记录运行并执行模拟交易。
-VIRTUAL_TRADE_NODES: list[tuple[str, NodeFn]] = [
-    ("load_trade_context", load_trade_context_node),
-    ("rule_based_signal_scoring", rule_based_signal_scoring_node),
+# Agent 分析流程：加载行情和待验证预测，生成方向共识并记录运行。
+AGENT_ANALYSIS_NODES: list[tuple[str, NodeFn]] = [
+    ("load_agent_analysis_context", load_agent_analysis_context_node),
+    ("rule_based_consensus_scoring", rule_based_consensus_scoring_node),
     ("risk_rule", risk_rule_node),
-    ("trade_decision_rule", trade_decision_rule_node),
-    ("trade_signal_explanation", trade_signal_explanation_node),
+    ("analysis_decision_rule", analysis_decision_rule_node),
+    ("agent_analysis_explanation", agent_analysis_explanation_node),
     ("display_translation", display_translation_node),
     ("persist_agent_run", persist_agent_run_node),
-    ("execute_virtual_trade_rule", execute_virtual_trade_rule_node),
+    ("finalize_agent_analysis", finalize_agent_analysis_node),
 ]
 
 # 预测验证流程：找出到期预测，按规则评分，并生成解释性报告。
@@ -82,7 +82,7 @@ PREDICTION_VERIFICATION_NODES: list[tuple[str, NodeFn]] = [
     ("save_verification_report", save_verification_report_node),
 ]
 
-# 每日报告流程：汇总行情、共识、情景分析和账户快照，最后保存日报。
+# 每日报告流程：汇总行情、共识、情景分析和预测表现，最后保存日报。
 DAILY_REPORT_NODES: list[tuple[str, NodeFn]] = [
     ("load_daily_report_context", load_daily_report_context_node),
     ("market_summary", report_market_summary_node),
@@ -147,14 +147,14 @@ def run_opinion_ingestion_graph(conn: sqlite3.Connection, payload: Any, current_
     )
 
 
-def run_virtual_trade_signal_graph(
+def run_agent_analysis_graph(
     conn: sqlite3.Connection,
     trigger: str = "manual",
     focus_prediction_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     return run_graph(
-        "virtual_trade",
-        VIRTUAL_TRADE_NODES,
+        "agent_analysis",
+        AGENT_ANALYSIS_NODES,
         {
             "conn": conn,
             "trigger": trigger,
