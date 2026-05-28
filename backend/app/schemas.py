@@ -55,5 +55,22 @@ class MarketHistorySyncCreate(BaseModel):
     replace: bool = False
 
 
+class GateSyncCreate(BaseModel):
+    tasks: list[str] = Field(
+        default_factory=lambda: ["gate_btc_contract_sync"],
+        description="要执行的同步任务列表",
+    )
+
+
+class MarketMemoryCreate(BaseModel):
+    memory_type: str = Field(min_length=1, max_length=50)
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=4000)
+    symbol: str = "BTCUSDT"
+    importance: float = Field(default=0.5, ge=0, le=1)
+    valid_from: str | None = None
+    valid_until: str | None = None
+
+
 class ApiMessage(BaseModel):
     message: str

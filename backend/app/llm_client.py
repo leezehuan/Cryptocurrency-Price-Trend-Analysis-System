@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .config_loader import load_model_api_config, load_prompts_config
+from .config_loader import load_model_api_config, load_prompts_config, load_skill_prompt
 
 
 class LLMClientError(RuntimeError):
@@ -97,6 +97,14 @@ def normalize_node_output(node_name: str, payload: dict[str, Any]) -> dict[str, 
 
 def get_node_prompt(graph_name: str, node_name: str) -> dict[str, Any]:
     prompts = load_prompts_config()
+    if graph_name == "skills":
+        node_prompt = load_skill_prompt(node_name)
+        if not node_prompt:
+            raise LLMClientError(f"missing skill prompt config: {node_name}")
+        return {
+            "global_system_prompt": prompts.get("global_system_prompt", ""),
+            **node_prompt,
+        }
     graph = prompts.get("graphs", {}).get(graph_name, {})
     node_prompt = graph.get(node_name, {})
     if not node_prompt:

@@ -12,6 +12,7 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 MODEL_API_CONFIG = CONFIG_DIR / "model_api.json"
 MODEL_API_LOCAL_CONFIG = CONFIG_DIR / "model_api.local.json"
 PROMPTS_CONFIG = CONFIG_DIR / "prompts.json"
+SKILLS_CONFIG_DIR = CONFIG_DIR / "skills"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -60,9 +61,26 @@ def load_prompts_config() -> dict[str, Any]:
     return read_json(PROMPTS_CONFIG)
 
 
+def load_skill_prompt(skill_name: str) -> dict[str, Any]:
+    return read_json(SKILLS_CONFIG_DIR / skill_name / "prompt.json")
+
+
+def load_skills_config() -> dict[str, Any]:
+    if not SKILLS_CONFIG_DIR.exists():
+        return {}
+    skills: dict[str, Any] = {}
+    for item in sorted(SKILLS_CONFIG_DIR.iterdir()):
+        if item.is_dir():
+            prompt = read_json(item / "prompt.json")
+            if prompt:
+                skills[item.name] = prompt
+    return skills
+
+
 def load_runtime_config() -> dict[str, Any]:
     # 返回前端设置页需要展示的完整运行时配置。
     return {
         "model_api": load_model_api_config(mask_secrets=True),
         "prompts": load_prompts_config(),
+        "skills": load_skills_config(),
     }

@@ -13,7 +13,7 @@ from .config_loader import load_runtime_config
 from .database import clear_demo_data, connect, init_db, sync_market_history, sync_market_intervals, sync_real_market_data
 from .llm_client import test_model_connection
 from .scheduler import scheduler_status, start_scheduler, stop_scheduler
-from .schemas import AgentRunCreate, MarketHistorySyncCreate, MarketIntervalsSyncCreate, OpinionCreate, PredictionManualUpdate, ReviewConfirmCreate, ReviewRejectCreate, SettingUpdate
+from .schemas import AgentRunCreate, GateSyncCreate, MarketHistorySyncCreate, MarketIntervalsSyncCreate, MarketMemoryCreate, OpinionCreate, PredictionManualUpdate, ReviewConfirmCreate, ReviewRejectCreate, SettingUpdate
 from .services import (
     confirm_human_review,
     create_opinion,
@@ -48,6 +48,16 @@ from .services import (
     update_setting,
     update_prediction_manual,
     verify_due_predictions,
+)
+from .gate_mcp import (
+    active_market_memories,
+    gate_mcp_source_status,
+    latest_btc_contract_metrics,
+    latest_nasdaq_data,
+    latest_sentiment_snapshot,
+    list_analyst_source_accounts,
+    recent_followed_user_posts,
+    recent_square_posts,
 )
 
 # 创建 FastAPI 应用实例，统一承载行情、预测、Agent 和报告接口。
@@ -423,3 +433,190 @@ def get_reports(
     db: sqlite3.Connection = Depends(get_db),
 ) -> list[dict[str, object]]:
     return list_reports(db, limit)
+
+
+# ---------------------------------------------------------------------------
+# Gate MCP 数据源 API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sources/gate/status")
+def get_gate_status(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    return gate_mcp_source_status(db)
+
+
+@app.post("/api/sources/gate/sync")
+def post_gate_sync(
+    payload: GateSyncCreate,
+    db: sqlite3.Connection = Depends(get_db),
+) -> dict[str, object]:
+    allowed = {
+        "gate_btc_contract_sync", "gate_news_sync",
+        "gate_square_hot_sync", "market_sentiment_build",
+        "market_memory_compact", "gate_square_user_sync",
+        "gate_info_sync", "nasdaq_index_sync",
+    }
+    results: dict[str, object] = {}
+    for task in payload.tasks:
+        if task not in allowed:
+            results[task] = {"error": f"unknown gate task: {task}"}
+            continue
+        results[task] = run_scheduled_task(db, task)
+    return results
+
+
+@app.get("/api/market/btc-contract")
+def get_btc_contract(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    return latest_btc_contract_metrics(db)
+
+
+@app.get("/api/square/hot")
+def get_square_hot(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: sqlite3.Connection = Depends(get_db),
+) -> list[dict[str, object]]:
+    return recent_square_posts(db, limit)
+
+
+@app.get("/api/sentiment/market")
+def get_market_sentiment(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    return latest_sentiment_snapshot(db)
+
+
+@app.get("/api/memory")
+def get_memories(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: sqlite3.Connection = Depends(get_db),
+) -> list[dict[str, object]]:
+    return active_market_memories(db, limit=limit)
+
+
+@app.post("/api/memory")
+def post_memory(
+    payload: MarketMemoryCreate,
+    db: sqlite3.Connection = Depends(get_db),
+) -> dict[str, object]:
+    from .database import utc_now
+    now = utc_now()
+    cursor = db.execute(
+        """
+        INSERT INTO market_memories (
+            memory_type, symbol, title, content, importance,
+            valid_from, valid_until, is_active, source, payload,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'manual', '{}', ?, ?)
+        """,
+        (
+            payload.memory_type, payload.symbol, payload.title,
+            payload.content, payload.importance,
+            payload.valid_from, payload.valid_until,
+            now, now,
+        ),
+    )
+    db.commit()
+    return {"id": cursor.lastrowid, "created": True}
+
+
+# ---------------------------------------------------------------------------
+# Phase A: 新增 API 端点
+# ---------------------------------------------------------------------------
+
+@app.get("/api/market/nasdaq")
+def get_nasdaq(
+    symbol: str = Query(default="IXIC"),
+    limit: int = Query(default=5, ge=1, le=50),
+    db: sqlite3.Connection = Depends(get_db),
+) -> list[dict[str, object]]:
+    return latest_nasdaq_data(db, symbol=symbol, limit=limit)
+
+
+@app.get("/api/square/user-opinions")
+def get_square_user_opinions(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: sqlite3.Connection = Depends(get_db),
+) -> list[dict[str, object]]:
+    return recent_followed_user_posts(db, limit)
+
+
+@app.get("/api/sources/gate/accounts")
+def get_gate_accounts(db: sqlite3.Connection = Depends(get_db)) -> list[dict[str, object]]:
+    return list_analyst_source_accounts(db)
+
+
+@app.post("/api/memory/refresh")
+def post_memory_refresh(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    return run_scheduled_task(db, "market_memory_compact")
+
+
+@app.get("/api/agent/runs/{run_id}/evidence")
+def get_agent_run_evidence(
+    run_id: int,
+    db: sqlite3.Connection = Depends(get_db),
+) -> dict[str, object]:
+    run_row = db.execute(
+        "SELECT id, input_snapshot, output_snapshot FROM agent_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    if not run_row:
+        return {"error": "agent run not found"}
+    input_snap = json.loads(run_row["input_snapshot"] or "{}")
+    output_snap = json.loads(run_row["output_snapshot"] or "{}")
+    node_rows = db.execute(
+        "SELECT node_name, input_snapshot, output_snapshot FROM agent_node_runs WHERE agent_run_id = ? ORDER BY id",
+        (run_id,),
+    ).fetchall()
+    nodes = []
+    for nr in node_rows:
+        output_data = json.loads(nr["output_snapshot"] or "{}")
+        nodes.append({
+            "node_name": nr["node_name"],
+            "input_snapshot": json.loads(nr["input_snapshot"] or "{}"),
+            "output_snapshot": output_data,
+        })
+    evidence_refs: list[str] = []
+    for node in nodes:
+        out = node.get("output_snapshot") or {}
+        if isinstance(out, dict):
+            evidence_refs.extend(out.get("evidence", []))
+    return {
+        "agent_run_id": run_id,
+        "input_snapshot": input_snap,
+        "output_snapshot": output_snap,
+        "node_runs": nodes,
+        "evidence_refs": evidence_refs,
+    }
+
+
+@app.get("/api/agent/runs/{run_id}/reflection")
+def get_agent_run_reflection(
+    run_id: int,
+    db: sqlite3.Connection = Depends(get_db),
+) -> dict[str, object]:
+    run_row = db.execute(
+        "SELECT id, output_snapshot FROM agent_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    if not run_row:
+        return {"error": "agent run not found"}
+    output_snap = json.loads(run_row["output_snapshot"] or "{}")
+    node_rows = db.execute(
+        """
+        SELECT node_name, input_snapshot, output_snapshot
+        FROM agent_node_runs
+        WHERE agent_run_id = ? AND node_name = 'reflection_critique'
+        ORDER BY id
+        """,
+        (run_id,),
+    ).fetchall()
+    nodes = [
+        {
+            "node_name": row["node_name"],
+            "input_snapshot": json.loads(row["input_snapshot"] or "{}"),
+            "output_snapshot": json.loads(row["output_snapshot"] or "{}"),
+        }
+        for row in node_rows
+    ]
+    return {
+        "agent_run_id": run_id,
+        "reflection": output_snap.get("reflection", {}),
+        "node_runs": nodes,
+    }

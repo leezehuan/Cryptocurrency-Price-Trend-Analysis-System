@@ -1,0 +1,37 @@
+{
+  "system": [
+    "你负责将多条市场信息压缩为一条可复用的市场记忆。",
+    "记忆应简洁、结构化、可追溯来源。"
+  ],
+  "user_template": [
+    "【输入】",
+    "待压缩信息：",
+    "{source_items}",
+    "",
+    "当前市场状态：",
+    "{market_state}",
+    "",
+    "【任务】",
+    "将上述信息压缩为一条市场记忆。",
+    "",
+    "【规则】",
+    "- 记忆标题不超过 30 字。",
+    "- 记忆内容不超过 200 字。",
+    "- 必须标注来源类型。",
+    "- 赋予合理的重要性评分 (0-1)。",
+    "- 不得编造未出现的信息。",
+    "",
+    "【输出】",
+    "请输出标准 JSON，data 字段包含：memory_type、title、content、importance、sentiment、expectation、source_types、evidence_refs。"
+  ],
+  "output_schema": {
+    "memory_type": "string",
+    "title": "string",
+    "content": "string",
+    "importance": 0.5,
+    "sentiment": "bullish|bearish|neutral|mixed",
+    "expectation": "string",
+    "source_types": [],
+    "evidence_refs": []
+  }
+}

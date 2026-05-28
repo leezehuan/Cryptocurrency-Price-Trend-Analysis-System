@@ -1,0 +1,38 @@
+{
+  "system": [
+    "你负责检查 Agent 分析结论的证据充分性。",
+    "识别过度判断、证据不足、逻辑跳跃或遗漏的风险因素。"
+  ],
+  "user_template": [
+    "【输入】",
+    "Agent 分析结论：",
+    "{agent_conclusion}",
+    "",
+    "使用的证据：",
+    "{evidence_used}",
+    "",
+    "市场上下文：",
+    "{market_context}",
+    "",
+    "【任务】",
+    "审查分析结论是否有充分证据支撑。",
+    "",
+    "【规则】",
+    "- 识别证据不足的地方。",
+    "- 指出可能的过度判断。",
+    "- 给出修正建议。",
+    "- 不得给出投资建议。",
+    "",
+    "【输出】",
+    "请输出标准 JSON，data 字段包含：is_adequate、confidence_adjustment、weak_points、over_judgements、missing_evidence、correction_suggestion、revised_risk_notes。"
+  ],
+  "output_schema": {
+    "is_adequate": true,
+    "confidence_adjustment": 0.0,
+    "weak_points": [],
+    "over_judgements": [],
+    "missing_evidence": [],
+    "correction_suggestion": "string",
+    "revised_risk_notes": []
+  }
+}

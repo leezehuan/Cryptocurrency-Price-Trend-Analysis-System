@@ -144,6 +144,8 @@ def collect_display_payload(state: dict[str, Any]) -> dict[str, Any]:
         "risk": state.get("risk"),
         "decision_label": state.get("decision_label"),
         "analysis_explanation": output_data(state, "agent_analysis_explanation"),
+        "evidence_conflict": state.get("evidence_conflict", {}),
+        "reflection": state.get("reflection", {}),
         "verification_explanation": output_data(state, "verification_explanation"),
         "failure_reason": output_data(state, "failure_reason"),
         "report": state.get("report", {}),
@@ -170,6 +172,10 @@ def apply_display_payload(state: dict[str, Any], payload: dict[str, Any]) -> Non
         state["decision_label"] = payload["decision_label"]
     if payload.get("report"):
         state["report"] = payload["report"]
+    if payload.get("evidence_conflict"):
+        state["evidence_conflict"] = payload["evidence_conflict"]
+    if payload.get("reflection"):
+        state["reflection"] = payload["reflection"]
     for node_name in ("agent_analysis_explanation", "verification_explanation", "failure_reason"):
         if node_name in payload:
             replace_node_data(state, node_name, payload[node_name])
@@ -584,14 +590,42 @@ def persist_opinion_node(state: dict[str, Any]) -> dict[str, Any]:
     return apply_node_output(state, "persist_opinion", output, {"prediction_ids": created.get("prediction_ids", [])})
 
 
+def _build_gate_context(conn: sqlite3.Connection) -> dict[str, Any]:
+    """构建 Gate MCP 增强上下文（合约/情绪/记忆），供 Agent 各流程复用。"""
+    try:
+        from .gate_mcp import latest_btc_contract_metrics, latest_sentiment_snapshot, active_market_memories
+        nasdaq_rows = conn.execute(
+            "SELECT * FROM nasdaq_market_data ORDER BY fetched_at DESC LIMIT 8"
+        ).fetchall()
+        gate_ctx: dict[str, Any] = {
+            "contract_metrics": latest_btc_contract_metrics(conn),
+            "sentiment_snapshot": latest_sentiment_snapshot(conn),
+            "active_memories": active_market_memories(conn, limit=10),
+            "nasdaq_context": rows_to_dicts(nasdaq_rows),
+        }
+    except Exception:
+        gate_ctx = {}
+    return gate_ctx
+
+
 def load_agent_analysis_context_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
     summary = rules.market_summary(state["conn"])
     predictions = rules.pending_predictions_for_agent(state["conn"])
+    gate_ctx = _build_gate_context(state["conn"])
     state["market"] = summary
     state["pending_predictions"] = predictions
-    output = standard_node_output("load_agent_analysis_context", {"market": summary, "pending_prediction_count": len(predictions)})
+    state["gate_context"] = gate_ctx
+    state["nasdaq_context"] = gate_ctx.get("nasdaq_context", [])
+    state["react_tools_used"] = []
+    state["react_tool_results"] = {}
+    output = standard_node_output("load_agent_analysis_context", {
+        "market": summary,
+        "pending_prediction_count": len(predictions),
+        "gate_context_available": bool(gate_ctx.get("contract_metrics")),
+        "nasdaq_context_available": bool(gate_ctx.get("nasdaq_context")),
+    })
     return apply_node_output(state, "load_agent_analysis_context", output, {"focus_prediction_ids": state.get("focus_prediction_ids", [])})
 
 
@@ -659,6 +693,262 @@ def agent_analysis_explanation_node(state: dict[str, Any]) -> dict[str, Any]:
     return apply_node_output(state, "agent_analysis_explanation", output, values)
 
 
+def evidence_sufficiency_check_node(state: dict[str, Any]) -> dict[str, Any]:
+    """固定代码判断证据是否充分，决定是否需要 ReAct Tool 补充。"""
+    gate_ctx = state.get("gate_context") or {}
+    predictions = state.get("pending_predictions", [])
+    signal = state.get("signal", {})
+
+    needs_supplement = False
+    reasons: list[str] = []
+
+    # 规则 1：无合约指标
+    if not gate_ctx.get("contract_metrics"):
+        needs_supplement = True
+        reasons.append("缺少 BTC 合约指标")
+
+    # 规则 2：无情绪快照
+    if not gate_ctx.get("sentiment_snapshot"):
+        needs_supplement = True
+        reasons.append("缺少市场情绪快照")
+
+    # 规则 3：置信度低且预测少
+    if signal.get("confidence") == "low" and len(predictions) < 3:
+        needs_supplement = True
+        reasons.append("分析置信度低且预测样本不足")
+    if signal.get("confidence") == "low":
+        needs_supplement = True
+        reasons.append("缺少技术面补充信息")
+
+    # 规则 4：无活跃记忆
+    if not gate_ctx.get("active_memories"):
+        needs_supplement = True
+        reasons.append("无活跃市场记忆")
+
+    data = {
+        "is_sufficient": not needs_supplement,
+        "needs_supplement": needs_supplement,
+        "reasons": reasons,
+    }
+    output = standard_node_output("evidence_sufficiency_check", data)
+    return apply_node_output(state, "evidence_sufficiency_check", output, data)
+
+
+def rule_based_react_tools(reasons: list[str]) -> list[str]:
+    selected: list[str] = []
+    if any("合约" in r for r in reasons):
+        selected.append("gate_market_research")
+    if any("情绪" in r for r in reasons):
+        selected.append("gate_square_research")
+    if any("记忆" in r for r in reasons):
+        selected.append("market_memory_search")
+    if any("置信度" in r or "样本" in r for r in reasons):
+        selected.append("gate_news_research")
+    if any("技术" in r or "链上" in r or "指标" in r for r in reasons):
+        selected.append("gate_info_research")
+    return list(dict.fromkeys(selected))
+
+
+def react_tool_selection_node(state: dict[str, Any]) -> dict[str, Any]:
+    """根据证据缺口选择并调用 Agent Tools 补充信息。"""
+    from .agent_tools import list_agent_tools, run_agent_tool
+
+    sufficiency = output_data(state, "evidence_sufficiency_check")
+    if not sufficiency.get("needs_supplement"):
+        output = standard_node_output("react_tool_selection", {"tools_called": [], "skipped": True})
+        return apply_node_output(state, "react_tool_selection", output, {})
+
+    conn = state["conn"]
+    gate_ctx = state.get("gate_context") or {}
+    reasons = sufficiency.get("reasons", [])
+    tool_catalog = list_agent_tools()
+    allowed_tools = {item["name"] for item in tool_catalog}
+    fallback_tools = rule_based_react_tools([str(reason) for reason in reasons])
+    selection_values = {
+        "evidence_gaps": reasons,
+        "market_summary": state.get("market", {}),
+        "analysis_signal": state.get("signal", {}),
+        "gate_context": gate_ctx,
+        "tool_catalog": tool_catalog,
+    }
+    selection_output = llm_or_fallback(
+        state,
+        "agent_analysis",
+        "react_tool_selection",
+        selection_values,
+        {
+            "selected_tools": fallback_tools or ["no_tool"],
+            "selection_reason": "规则兜底：按证据缺口关键词选择工具",
+            "expected_evidence": reasons,
+        },
+    )
+    selected_raw = selection_output.get("data", {}).get("selected_tools") or fallback_tools
+    if isinstance(selected_raw, str):
+        selected_raw = [item.strip() for item in selected_raw.split(",") if item.strip()]
+    selected_tools = [
+        str(item)
+        for item in selected_raw
+        if str(item) in allowed_tools and str(item) != "no_tool"
+    ]
+    if not selected_tools and "no_tool" not in [str(item) for item in selected_raw]:
+        selected_tools = fallback_tools
+    selected_tools = list(dict.fromkeys(selected_tools))
+    tools_called: list[str] = []
+    tool_results: dict[str, Any] = {}
+
+    for tool_name in selected_tools:
+        result = run_agent_tool(conn, tool_name)
+        tools_called.append(tool_name)
+        tool_results[tool_name] = result
+        if tool_name == "gate_market_research":
+            if result.get("found") and result.get("contract_metrics"):
+                gate_ctx["contract_metrics"] = result["contract_metrics"]
+        elif tool_name == "market_memory_search":
+            if result.get("found") and result.get("memories"):
+                gate_ctx["active_memories"] = result["memories"]
+        elif tool_name == "gate_square_research":
+            gate_ctx["square_research"] = result
+        elif tool_name == "gate_news_research":
+            gate_ctx["news_research"] = result
+        elif tool_name == "gate_info_research":
+            gate_ctx["info_research"] = result
+
+    state["gate_context"] = gate_ctx
+    state["react_tools_used"] = tools_called
+    state["react_tool_results"] = tool_results
+
+    data = {
+        "tools_called": tools_called,
+        "tool_results": tool_results,
+        "selection": selection_output.get("data", {}),
+        "skipped": not bool(tools_called),
+    }
+    output = standard_node_output(
+        "react_tool_selection",
+        data,
+        warnings=selection_output.get("warnings", []),
+        evidence=[f"tool:{tool}" for tool in tools_called],
+    )
+    return apply_node_output(state, "react_tool_selection", output, selection_values)
+
+
+def evidence_conflict_judgement_node(state: dict[str, Any]) -> dict[str, Any]:
+    gate_ctx = state.get("gate_context", {})
+    market_signal = {
+        "market": state.get("market", {}),
+        "signal": state.get("signal", {}),
+        "decision": state.get("decision"),
+        "risk": state.get("risk"),
+        "nasdaq_context": gate_ctx.get("nasdaq_context", []),
+        "react_tool_results": state.get("react_tool_results", {}),
+    }
+    analyst_opinions = state.get("pending_predictions", [])[:20]
+    sentiment_snapshot = gate_ctx.get("sentiment_snapshot", {})
+    market_memories = gate_ctx.get("active_memories", [])
+    fallback = {
+        "has_conflict": False,
+        "conflict_points": [],
+        "source_credibility": {
+            "market_signal": "medium",
+            "analyst_opinions": "medium",
+            "sentiment_snapshot": "medium" if sentiment_snapshot else "low",
+            "market_memories": "medium" if market_memories else "low",
+        },
+        "overall_confidence": state.get("signal", {}).get("confidence", "medium"),
+        "recommended_weight_adjustments": {},
+        "summary": "规则兜底：未发现明确多源冲突。",
+    }
+    decision = state.get("decision")
+    sentiment = str((sentiment_snapshot or {}).get("overall_sentiment") or "")
+    if decision == "bullish" and sentiment in {"fear", "extreme_fear", "bearish"}:
+        fallback["has_conflict"] = True
+        fallback["conflict_points"].append("Agent 偏多，但情绪快照偏恐慌/看空")
+        fallback["overall_confidence"] = "low"
+    if decision == "bearish" and sentiment in {"greed", "extreme_greed", "bullish"}:
+        fallback["has_conflict"] = True
+        fallback["conflict_points"].append("Agent 偏空，但情绪快照偏贪婪/看多")
+        fallback["overall_confidence"] = "low"
+    output = llm_or_fallback(
+        state,
+        "skills",
+        "evidence_conflict_judgement",
+        {
+            "market_signal": market_signal,
+            "analyst_opinions": analyst_opinions,
+            "sentiment_snapshot": sentiment_snapshot,
+            "market_memories": market_memories,
+        },
+        fallback,
+    )
+    conflict_data = output.get("data", {})
+    state["evidence_conflict"] = conflict_data
+    if conflict_data.get("has_conflict"):
+        points = "；".join(str(item) for item in conflict_data.get("conflict_points", [])[:3])
+        if points and points not in state.get("risk", ""):
+            state["risk"] = f"{state.get('risk', '')}；证据冲突：{points}" if state.get("risk") else f"证据冲突：{points}"
+    return apply_node_output(state, "evidence_conflict_judgement", output, {"market_signal": market_signal, "gate_context": gate_ctx})
+
+
+def reflection_critique_node(state: dict[str, Any]) -> dict[str, Any]:
+    """结论输出前的反思检查，验证证据充分性和是否存在过度判断。"""
+    conclusion = {
+        "decision": state.get("decision"),
+        "decision_label": state.get("decision_label"),
+        "risk": state.get("risk"),
+        "signal": state.get("signal"),
+        "analysis_explanation": output_data(state, "agent_analysis_explanation"),
+        "evidence_conflict": state.get("evidence_conflict", {}),
+    }
+    evidence = {
+        "gate_context": state.get("gate_context", {}),
+        "react_tools_used": state.get("react_tools_used", []),
+        "react_tool_results": state.get("react_tool_results", {}),
+        "evidence_conflict": state.get("evidence_conflict", {}),
+        "pending_prediction_count": len(state.get("pending_predictions", [])),
+    }
+    market_context = state.get("market", {})
+
+    fallback = {
+        "is_adequate": True,
+        "confidence_adjustment": 0.0,
+        "weak_points": [],
+        "over_judgements": [],
+        "missing_evidence": [],
+        "correction_suggestion": "",
+        "revised_risk_notes": [],
+    }
+
+    # 简单规则检查
+    signal = state.get("signal", {})
+    if signal.get("confidence") == "low" and state.get("decision") != "observe":
+        fallback["is_adequate"] = False
+        fallback["weak_points"].append("置信度低但给出了方向性结论")
+        fallback["confidence_adjustment"] = -0.1
+    if not state.get("pending_predictions"):
+        fallback["weak_points"].append("无待验证预测作为决策依据")
+
+    output = llm_or_fallback(
+        state,
+        "skills",
+        "reflection_critique",
+        {"agent_conclusion": conclusion, "evidence_used": evidence, "market_context": market_context},
+        fallback,
+    )
+
+    reflection_data = output.get("data", {})
+    state["reflection"] = reflection_data
+
+    # 如果反思建议修正风险提示，追加到 state
+    revised_notes = reflection_data.get("revised_risk_notes", [])
+    if revised_notes:
+        current_risk = state.get("risk", "")
+        extra = "；".join(str(n) for n in revised_notes if n)
+        if extra and extra not in current_risk:
+            state["risk"] = f"{current_risk}；{extra}" if current_risk else extra
+
+    return apply_node_output(state, "reflection_critique", output, {"conclusion": conclusion})
+
+
 def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
     # 保存一次 Agent 运行摘要，并把前置节点记录关联到该运行。
     conn = state["conn"]
@@ -671,6 +961,8 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
         "pending_predictions": state.get("pending_predictions", [])[:12],
         "focus_prediction_ids": state.get("focus_prediction_ids", []),
         "graph": "agent_analysis",
+        "gate_context": state.get("gate_context", {}),
+        "nasdaq_context": state.get("nasdaq_context", []),
         "node_outputs": state.get("node_outputs", {}),
     }
     output_snapshot = {
@@ -679,6 +971,12 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
         "risk": state["risk"],
         "signal": signal,
         "analysis_explanation": output_data(state, "agent_analysis_explanation"),
+        "react_tools_used": state.get("react_tools_used", []),
+        "react_tool_results": state.get("react_tool_results", {}),
+        "evidence_conflict": state.get("evidence_conflict", {}),
+        "gate_context_summary": state.get("gate_context", {}),
+        "nasdaq_context": state.get("nasdaq_context", []),
+        "reflection": state.get("reflection", {}),
     }
     cursor = conn.execute(
         """
@@ -725,6 +1023,12 @@ def finalize_agent_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
         "signal": state["signal"],
         "analysis_event": analysis_event,
         "analysis_explanation": output_data(state, "agent_analysis_explanation"),
+        "react_tools_used": state.get("react_tools_used", []),
+        "react_tool_results": state.get("react_tool_results", {}),
+        "evidence_conflict": state.get("evidence_conflict", {}),
+        "gate_context_summary": state.get("gate_context", {}),
+        "nasdaq_context": state.get("nasdaq_context", []),
+        "reflection": state.get("reflection", {}),
     }
     state["conn"].execute("UPDATE agent_runs SET output_snapshot = ? WHERE id = ?", (as_json(output_snapshot), state["agent_run_id"]))
     state["conn"].commit()
@@ -766,6 +1070,7 @@ def rule_based_verification_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def verification_explanation_node(state: dict[str, Any]) -> dict[str, Any]:
+    gate_ctx = state.get("gate_context") or _build_gate_context(state["conn"])
     explanations = []
     for item in state.get("verified", []):
         prediction = next((prediction for prediction in state.get("due_predictions", []) if prediction["id"] == item["prediction_id"]), {})
@@ -781,7 +1086,7 @@ def verification_explanation_node(state: dict[str, Any]) -> dict[str, Any]:
             state,
             "prediction_verification",
             "verification_explanation",
-            {"prediction": prediction, "verification_market_data": {}, "verification_result": item},
+            {"prediction": prediction, "verification_market_data": {}, "verification_result": item, "gate_context": gate_ctx},
             fallback,
         )
         explanations.append({"prediction_id": item["prediction_id"], **output.get("data", {})})
@@ -793,6 +1098,7 @@ def failure_reason_node(state: dict[str, Any]) -> dict[str, Any]:
     from . import services as rules
 
     market = rules.market_summary(state["conn"])
+    gate_ctx = state.get("gate_context") or _build_gate_context(state["conn"])
     reasons = []
     for item in state.get("verified", []):
         if item.get("status") != "failed":
@@ -810,7 +1116,7 @@ def failure_reason_node(state: dict[str, Any]) -> dict[str, Any]:
             state,
             "prediction_verification",
             "failure_reason",
-            {"prediction": prediction, "verification_result": item, "market_summary": market, "indicator_summary": market, "view_change_records": []},
+            {"prediction": prediction, "verification_result": item, "market_summary": market, "indicator_summary": market, "view_change_records": [], "gate_context": gate_ctx},
             fallback,
         )
         reasons.append({"prediction_id": item["prediction_id"], **output.get("data", {})})
@@ -825,6 +1131,11 @@ def save_verification_report_node(state: dict[str, Any]) -> dict[str, Any]:
     explanations = {item["prediction_id"]: item for item in output_data(state, "verification_explanation").get("items", [])}
     reasons = {item["prediction_id"]: item for item in output_data(state, "failure_reason").get("items", [])}
     predictions = {item["id"]: item for item in state.get("due_predictions", [])}
+    gate_ctx = state.get("gate_context") or _build_gate_context(state["conn"])
+    context_snapshot = {
+        "gate_context": gate_ctx,
+        "market_summary": rules.market_summary(state["conn"]),
+    }
     reports: dict[int, dict[str, Any]] = {}
     for item in state.get("verified", []):
         prediction_id = int(item["prediction_id"])
@@ -834,6 +1145,7 @@ def save_verification_report_node(state: dict[str, Any]) -> dict[str, Any]:
             item,
             explanations.get(prediction_id),
             reasons.get(prediction_id),
+            context_snapshot=context_snapshot,
             commit=False,
         )
     state["conn"].commit()
@@ -892,12 +1204,15 @@ def load_daily_report_context_node(state: dict[str, Any]) -> dict[str, Any]:
     context = rules.daily_report_context(state["conn"])
     market = context["market"]
     predictions = context["active_predictions"]
+    gate_ctx = _build_gate_context(state["conn"])
     state["market"] = market
     state["active_predictions"] = predictions
     state["recent_verifications"] = context["recent_verifications"]
     state["prediction_changes"] = context["prediction_changes"]
     state["top_analysts"] = context["top_analysts"]
     state["report_context"] = context
+    state["gate_context"] = gate_ctx
+    state["nasdaq_context"] = gate_ctx.get("nasdaq_context", [])
     output = standard_node_output(
         "load_daily_report_context",
         {
@@ -905,6 +1220,7 @@ def load_daily_report_context_node(state: dict[str, Any]) -> dict[str, Any]:
             "active_prediction_count": len(predictions),
             "recent_verification_count": len(context["recent_verifications"]),
             "prediction_change_count": len(context["prediction_changes"]),
+            "gate_context_available": bool(gate_ctx.get("contract_metrics")),
         },
     )
     return apply_node_output(state, "load_daily_report_context", output, {})
@@ -1028,6 +1344,29 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
         change_distribution[change_type] = change_distribution.get(change_type, 0) + 1
     recent_prediction_review = f"近期验证 {len(recent_verifications)} 条，成功 {success_count} 条，平均分 {round(average_score, 3)}。" if recent_verifications else "暂无近期验证摘要。"
     prediction_change_review = f"近期观点变化 {len(prediction_changes)} 条，类型分布 {change_distribution}。" if prediction_changes else "近期暂无记录的观点变化。"
+    gate_ctx = state.get("gate_context") or {}
+    contract_status = ""
+    sentiment_status = ""
+    memory_status = ""
+    nasdaq_status = ""
+    sentiment_topics: list[str] = []
+    if gate_ctx.get("contract_metrics"):
+        cm = gate_ctx["contract_metrics"]
+        contract_status = f"合约状态 — mark_price: {cm.get('last_price')}, funding_rate: {cm.get('funding_rate')}, open_interest: {cm.get('open_interest')}"
+    if gate_ctx.get("sentiment_snapshot"):
+        ss = gate_ctx["sentiment_snapshot"]
+        sentiment_status = f"情绪快照 — {ss.get('overall_sentiment', 'unknown')}, bull_ratio: {ss.get('bull_ratio')}, bear_ratio: {ss.get('bear_ratio')}"
+        try:
+            sentiment_topics = json.loads(ss.get("dominant_topics") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            sentiment_topics = []
+    if gate_ctx.get("active_memories"):
+        mems = gate_ctx["active_memories"]
+        memory_status = f"活跃记忆 {len(mems)} 条"
+    if gate_ctx.get("nasdaq_context"):
+        nasdaq_items = gate_ctx["nasdaq_context"]
+        first = nasdaq_items[0]
+        nasdaq_status = f"纳指相关 — {first.get('symbol')} 最新 {first.get('price')}, change_pct: {first.get('change_pct')}"
     fallback = {
         "title": "BTC 每日市场观察",
         "executive_summary": market_summary_data.get("market_summary", "暂无市场摘要"),
@@ -1045,6 +1384,12 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
         "top_analysts": state.get("top_analysts", []),
         "recent_verifications": recent_verifications,
         "prediction_changes": prediction_changes,
+        "contract_status": contract_status,
+        "sentiment_status": sentiment_status,
+        "memory_status": memory_status,
+        "nasdaq_status": nasdaq_status,
+        "sentiment_topics": sentiment_topics,
+        "memory_summary": [item.get("title") for item in gate_ctx.get("active_memories", [])[:5]],
         "generated_at": utc_now(),
         "risk_warnings": market_summary_data.get("risk_notes", []),
         "disclaimer": "本报告仅用于信息整理与历史表现分析，不构成投资建议。",
@@ -1053,7 +1398,7 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
         state,
         "daily_report",
         "daily_report",
-        {"market_summary": market_summary_data, "indicator_summary": state["market"], "consensus_summary": consensus, "scenario_analysis": scenarios, "recent_verification_results": recent_verifications, "prediction_changes": prediction_changes},
+        {"market_summary": market_summary_data, "indicator_summary": state["market"], "consensus_summary": consensus, "scenario_analysis": scenarios, "recent_verification_results": recent_verifications, "prediction_changes": prediction_changes, "gate_context": gate_ctx},
         fallback,
     )
     report = {**fallback, **(output.get("data") or {})}

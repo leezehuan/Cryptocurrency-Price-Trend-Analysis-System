@@ -1217,12 +1217,23 @@ def daily_report_context(conn: sqlite3.Connection) -> dict[str, Any]:
         }
         for item in list_analysts(conn)[:5]
     ]
+    # Gate MCP 增强上下文（只读附加，失败不影响主流程）
+    gate_context: dict[str, Any] = {}
+    try:
+        from .gate_mcp import latest_btc_contract_metrics, latest_sentiment_snapshot, active_market_memories
+        gate_context["btc_contract"] = latest_btc_contract_metrics(conn)
+        gate_context["sentiment"] = latest_sentiment_snapshot(conn)
+        gate_context["memories"] = active_market_memories(conn, limit=10)
+    except Exception:
+        pass
+
     return {
         "market": market,
         "active_predictions": active_predictions,
         "recent_verifications": recent_verifications,
         "prediction_changes": prediction_changes,
         "top_analysts": top_analysts,
+        "gate_context": gate_context,
     }
 
 
@@ -1353,6 +1364,28 @@ def build_agent_analysis_signal(conn: sqlite3.Connection) -> dict[str, Any]:
         item for item in sorted(weighted_predictions, key=lambda value: float(value.get("weight") or 0), reverse=True)
         if supporting_direction is None or item.get("direction") == supporting_direction
     ][:8]
+    # Gate MCP 增强信号（只读附加，失败不影响核心信号）
+    gate_signal: dict[str, Any] = {}
+    try:
+        from .gate_mcp import latest_btc_contract_metrics, latest_sentiment_snapshot
+        gate_signal["btc_contract"] = latest_btc_contract_metrics(conn)
+        gate_signal["sentiment"] = latest_sentiment_snapshot(conn)
+        nasdaq_rows = conn.execute(
+            "SELECT * FROM nasdaq_market_data ORDER BY fetched_at DESC LIMIT 8"
+        ).fetchall()
+        gate_signal["nasdaq"] = rows_to_dicts(nasdaq_rows)
+        sentiment = gate_signal.get("sentiment", {})
+        if sentiment.get("overall_sentiment") in ("extreme_fear", "fear"):
+            risk_notes.append("Gate 情绪偏恐慌，注意短期下行风险")
+        elif sentiment.get("overall_sentiment") in ("extreme_greed", "greed"):
+            risk_notes.append("Gate 情绪偏贪婪，注意回调风险")
+        nasdaq_context = gate_signal.get("nasdaq", [])
+        if nasdaq_context:
+            first_change = nasdaq_context[0].get("change_pct")
+            if first_change is not None and float(first_change) <= -1:
+                risk_notes.append("纳指相关市场走弱，风险偏好可能承压")
+    except Exception:
+        pass
     return {
         "decision": decision,
         "direction": direction,
@@ -1366,6 +1399,7 @@ def build_agent_analysis_signal(conn: sqlite3.Connection) -> dict[str, Any]:
         "bear_count": bear_count,
         "risk_notes": risk_notes,
         "supporting_predictions": supporting_predictions,
+        "gate_signal": gate_signal,
     }
 
 
@@ -1413,6 +1447,7 @@ def build_verification_report(
     verification: dict[str, Any],
     explanation: dict[str, Any] | None = None,
     failure_reason: dict[str, Any] | None = None,
+    context_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # 生成面向用户的预测验证报告，包含评分拆解和行情路径。
     score = float(verification.get("score") or verification.get("final_score") or 0)
@@ -1462,6 +1497,7 @@ def build_verification_report(
             "closest_price": verification.get("closest_price"),
             "target_distance_pct": target_distance,
         },
+        "context_snapshot": context_snapshot or {},
     }
     return {
         "prediction_id": verification.get("prediction_id") or prediction.get("id"),
@@ -1477,10 +1513,11 @@ def save_prediction_verification_report(
     verification: dict[str, Any],
     explanation: dict[str, Any] | None = None,
     failure_reason: dict[str, Any] | None = None,
+    context_snapshot: dict[str, Any] | None = None,
     commit: bool = True,
 ) -> dict[str, Any]:
     # 将预测验证报告保存到 verification_reports 表。
-    report = build_verification_report(prediction, verification, explanation, failure_reason)
+    report = build_verification_report(prediction, verification, explanation, failure_reason, context_snapshot)
     cursor = conn.execute(
         """
         INSERT INTO verification_reports (prediction_id, plain_language_summary, failure_reason, payload, created_at)
@@ -1831,6 +1868,46 @@ def run_scheduled_daily_report(conn: sqlite3.Connection) -> dict[str, Any]:
     return create_daily_report(conn)
 
 
+def run_scheduled_gate_btc_sync(conn: sqlite3.Connection) -> dict[str, Any]:
+    from .gate_mcp import sync_btc_contract_metrics
+    return sync_btc_contract_metrics(conn)
+
+
+def run_scheduled_gate_news_sync(conn: sqlite3.Connection) -> dict[str, Any]:
+    from .gate_mcp import sync_gate_news
+    return sync_gate_news(conn)
+
+
+def run_scheduled_gate_square_sync(conn: sqlite3.Connection) -> dict[str, Any]:
+    from .gate_mcp import sync_gate_square_hot
+    return sync_gate_square_hot(conn)
+
+
+def run_scheduled_sentiment_build(conn: sqlite3.Connection) -> dict[str, Any]:
+    from .gate_mcp import build_market_sentiment_snapshot
+    return build_market_sentiment_snapshot(conn)
+
+
+def run_scheduled_memory_compact(conn: sqlite3.Connection) -> dict[str, Any]:
+    from .gate_mcp import compact_market_memories
+    return compact_market_memories(conn)
+
+
+def run_scheduled_gate_square_user_sync(conn: sqlite3.Connection) -> dict[str, Any]:
+    from .gate_mcp import sync_gate_square_user_opinions
+    return sync_gate_square_user_opinions(conn)
+
+
+def run_scheduled_gate_info_sync(conn: sqlite3.Connection) -> dict[str, Any]:
+    from .gate_mcp import sync_gate_info
+    return sync_gate_info(conn)
+
+
+def run_scheduled_nasdaq_sync(conn: sqlite3.Connection) -> dict[str, Any]:
+    from .gate_mcp import sync_nasdaq_data
+    return sync_nasdaq_data(conn)
+
+
 def run_scheduled_task(conn: sqlite3.Connection, task_name: str) -> dict[str, Any]:
     run_id = record_scheduled_task_start(conn, task_name)
     try:
@@ -1840,6 +1917,22 @@ def run_scheduled_task(conn: sqlite3.Connection, task_name: str) -> dict[str, An
             result = run_scheduled_verify_due(conn)
         elif task_name == "daily_report":
             result = run_scheduled_daily_report(conn)
+        elif task_name == "gate_btc_contract_sync":
+            result = run_scheduled_gate_btc_sync(conn)
+        elif task_name == "gate_news_sync":
+            result = run_scheduled_gate_news_sync(conn)
+        elif task_name == "gate_square_hot_sync":
+            result = run_scheduled_gate_square_sync(conn)
+        elif task_name == "market_sentiment_build":
+            result = run_scheduled_sentiment_build(conn)
+        elif task_name == "market_memory_compact":
+            result = run_scheduled_memory_compact(conn)
+        elif task_name == "gate_square_user_sync":
+            result = run_scheduled_gate_square_user_sync(conn)
+        elif task_name == "gate_info_sync":
+            result = run_scheduled_gate_info_sync(conn)
+        elif task_name == "nasdaq_index_sync":
+            result = run_scheduled_nasdaq_sync(conn)
         else:
             raise ValueError(f"unknown scheduled task: {task_name}")
     except Exception as exc:

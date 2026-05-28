@@ -111,6 +111,29 @@ def start_scheduler() -> None:
     if enabled:
         scheduler.add_job(_run_task, "interval", minutes=max(1, market_sync_minutes), args=["market_sync"], id="market_sync", replace_existing=True)
         scheduler.add_job(_run_task, "cron", hour=max(0, min(23, daily_report_hour)), minute=0, args=["daily_report"], id="daily_report", replace_existing=True)
+    # Gate MCP 数据源定时任务（需同时启用 scheduler 和 gate_mcp）
+    conn2 = connect()
+    try:
+        gate_mcp_enabled = bool(get_setting_value(conn2, "gate_mcp.enabled", False))
+        gate_btc_minutes = int(get_setting_value(conn2, "scheduler.gate_btc_sync_minutes", 5))
+        gate_news_minutes = int(get_setting_value(conn2, "scheduler.gate_news_sync_minutes", 30))
+        gate_square_minutes = int(get_setting_value(conn2, "scheduler.gate_square_sync_minutes", 60))
+        sentiment_minutes = int(get_setting_value(conn2, "scheduler.sentiment_build_minutes", 15))
+        memory_compact_hours = int(get_setting_value(conn2, "scheduler.memory_compact_hours", 6))
+        gate_info_minutes = int(get_setting_value(conn2, "scheduler.gate_info_sync_minutes", 30))
+        gate_square_user_minutes = int(get_setting_value(conn2, "scheduler.gate_square_user_sync_minutes", 15))
+        nasdaq_minutes = int(get_setting_value(conn2, "scheduler.nasdaq_sync_minutes", 30))
+    finally:
+        conn2.close()
+    if enabled and gate_mcp_enabled:
+        scheduler.add_job(_run_task, "interval", minutes=max(1, gate_btc_minutes), args=["gate_btc_contract_sync"], id="gate_btc_contract_sync", replace_existing=True)
+        scheduler.add_job(_run_task, "interval", minutes=max(1, gate_news_minutes), args=["gate_news_sync"], id="gate_news_sync", replace_existing=True)
+        scheduler.add_job(_run_task, "interval", minutes=max(5, gate_square_minutes), args=["gate_square_hot_sync"], id="gate_square_hot_sync", replace_existing=True)
+        scheduler.add_job(_run_task, "interval", minutes=max(1, sentiment_minutes), args=["market_sentiment_build"], id="market_sentiment_build", replace_existing=True)
+        scheduler.add_job(_run_task, "interval", hours=max(1, memory_compact_hours), args=["market_memory_compact"], id="market_memory_compact", replace_existing=True)
+        scheduler.add_job(_run_task, "interval", minutes=max(5, gate_info_minutes), args=["gate_info_sync"], id="gate_info_sync", replace_existing=True)
+        scheduler.add_job(_run_task, "interval", minutes=max(5, gate_square_user_minutes), args=["gate_square_user_sync"], id="gate_square_user_sync", replace_existing=True)
+        scheduler.add_job(_run_task, "interval", minutes=max(5, nasdaq_minutes), args=["nasdaq_index_sync"], id="nasdaq_index_sync", replace_existing=True)
     schedule_next_due_verification()
     scheduler.start()
 

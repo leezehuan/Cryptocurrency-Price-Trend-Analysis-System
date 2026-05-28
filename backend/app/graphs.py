@@ -13,6 +13,8 @@ from .graph_nodes import (
     daily_report_node,
     data_anomaly_check_node,
     display_translation_node,
+    evidence_conflict_judgement_node,
+    evidence_sufficiency_check_node,
     failure_reason_node,
     finalize_agent_analysis_node,
     human_confirmation_decision_node,
@@ -24,6 +26,8 @@ from .graph_nodes import (
     persist_opinion_node,
     prediction_extraction_node,
     publish_time_extraction_node,
+    react_tool_selection_node,
+    reflection_critique_node,
     report_market_summary_node,
     rule_based_consensus_scoring_node,
     rule_based_verification_node,
@@ -60,13 +64,17 @@ OPINION_INGESTION_NODES: list[tuple[str, NodeFn]] = [
     ("persist_opinion", persist_opinion_node),
 ]
 
-# Agent 分析流程：加载行情和待验证预测，生成方向共识并记录运行。
+# Agent 分析流程：加载行情和待验证预测，生成方向共识，检查证据充分性，按需补充，反思后记录运行。
 AGENT_ANALYSIS_NODES: list[tuple[str, NodeFn]] = [
     ("load_agent_analysis_context", load_agent_analysis_context_node),
     ("rule_based_consensus_scoring", rule_based_consensus_scoring_node),
     ("risk_rule", risk_rule_node),
     ("analysis_decision_rule", analysis_decision_rule_node),
     ("agent_analysis_explanation", agent_analysis_explanation_node),
+    ("evidence_sufficiency_check", evidence_sufficiency_check_node),
+    ("react_tool_selection", react_tool_selection_node),
+    ("evidence_conflict_judgement", evidence_conflict_judgement_node),
+    ("reflection_critique", reflection_critique_node),
     ("display_translation", display_translation_node),
     ("persist_agent_run", persist_agent_run_node),
     ("finalize_agent_analysis", finalize_agent_analysis_node),

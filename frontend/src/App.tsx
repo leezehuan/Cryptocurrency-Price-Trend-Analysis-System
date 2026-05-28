@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { Activity, Bot, BrainCircuit, CheckCircle2, Clock3, LineChart, RefreshCw, Send, ShieldAlert, TrendingDown, TrendingUp } from 'lucide-react';
+import { Activity, Bot, BrainCircuit, CheckCircle2, Clock3, Database, Flame, LineChart, RefreshCw, Send, ShieldAlert, TrendingDown, TrendingUp } from 'lucide-react';
 
 // 后端市场摘要接口返回的数据结构，用于顶部行情卡片和走势图。
 type MarketSummary = {
@@ -69,6 +69,22 @@ type AgentRun = {
       bull_count: number;
       bear_count: number;
     };
+    react_tools_used?: string[];
+    react_tool_results?: Record<string, unknown>;
+    evidence_conflict?: {
+      has_conflict?: boolean;
+      conflict_points?: string[];
+      overall_confidence?: string;
+      summary?: string;
+    };
+    gate_context_summary?: Record<string, unknown>;
+    nasdaq_context?: NasdaqRow[];
+    reflection?: {
+      is_adequate?: boolean;
+      weak_points?: string[];
+      confidence_adjustment?: number;
+      correction_suggestion?: string;
+    };
   };
 };
 
@@ -135,7 +151,10 @@ type VerificationReport = {
   prediction_id?: number;
   plain_language_summary?: string;
   failure_reason?: string | null;
-  data?: Record<string, unknown>;
+  data?: {
+    context_snapshot?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
 };
 
 // 系统设置项结构，对应后端 settings 表。
@@ -181,6 +200,12 @@ type AgentReport = {
     active_prediction_count?: number;
     recent_verification_count?: number;
     prediction_change_count?: number;
+    contract_status?: string;
+    sentiment_status?: string;
+    memory_status?: string;
+    nasdaq_status?: string;
+    sentiment_topics?: string[];
+    memory_summary?: string[];
     risk_warnings?: string[];
     disclaimer?: string;
   };
@@ -247,6 +272,87 @@ type PredictionEditForm = {
   summary: string;
 };
 
+type BtcContract = {
+  last_price?: number;
+  funding_rate?: number;
+  open_interest?: number;
+  change_pct_24h?: number;
+  high_24h?: number;
+  low_24h?: number;
+  volume_24h?: number;
+  [key: string]: unknown;
+};
+
+type NasdaqRow = {
+  id?: number;
+  symbol: string;
+  price?: number;
+  open?: number | null;
+  high?: number | null;
+  low?: number | null;
+  close?: number | null;
+  volume?: number | null;
+  change_pct?: number | null;
+  market_session?: string | null;
+  fetched_at?: string;
+  [key: string]: unknown;
+};
+
+type GateSourceStatus = Record<string, { count?: number; latest?: string | null } | Record<string, unknown>>;
+
+type SourceAccount = {
+  id?: number;
+  analyst_id?: number | null;
+  source_platform?: string;
+  source_user_id?: string;
+  display_name?: string;
+  enabled?: number;
+  created_at?: string;
+  [key: string]: unknown;
+};
+
+type SentimentSnapshot = {
+  overall_sentiment?: string;
+  bull_ratio?: number;
+  bear_ratio?: number;
+  funding_rate?: number;
+  snapshot_time?: string;
+  dominant_topics?: string[];
+  crowd_positioning?: string;
+  [key: string]: unknown;
+};
+
+type MarketMemory = {
+  id: number;
+  memory_type: string;
+  symbol: string;
+  title: string;
+  content: string;
+  importance: number;
+  sentiment?: string;
+  expectation?: string;
+  source?: string;
+  is_active: number;
+  valid_from?: string;
+  valid_until?: string;
+  created_at: string;
+  [key: string]: unknown;
+};
+
+type SquarePost = {
+  id: number;
+  post_id?: string;
+  content: string;
+  author?: string;
+  author_id?: string;
+  hot_score?: number;
+  repost_count?: number;
+  is_hot_post?: number;
+  is_followed_user?: number;
+  created_at: string;
+  [key: string]: unknown;
+};
+
 type Dashboard = {
   market: MarketSummary;
   pending_prediction_count: number;
@@ -298,8 +404,24 @@ type PredictionReplay = {
   verification_report?: VerificationReport;
 };
 
+type AgentEvidence = {
+  agent_run_id?: number;
+  input_snapshot?: Record<string, unknown>;
+  output_snapshot?: Record<string, unknown>;
+  evidence_refs?: string[];
+  node_runs?: Record<string, unknown>[];
+};
+
+type AgentReflection = {
+  agent_run_id?: number;
+  reflection?: Record<string, unknown>;
+  node_runs?: Record<string, unknown>[];
+};
+
 type AgentRunReplay = {
   agent_run?: AgentRun;
+  evidence?: AgentEvidence;
+  reflection?: AgentReflection;
   nodes?: {
     id: number;
     graph_name: string;
@@ -313,7 +435,7 @@ type AgentRunReplay = {
 };
 
 // 前端视图枚举，对应顶部导航标签。
-type AppView = 'overview' | 'analysts' | 'predictions' | 'agent' | 'settings';
+type AppView = 'overview' | 'analysts' | 'predictions' | 'agent' | 'memory' | 'square' | 'settings';
 
 // 默认 API 前缀为 /bit，可通过 Vite 环境变量覆盖。
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/bit';
@@ -323,6 +445,8 @@ const APP_VIEWS: { id: AppView; label: string; description: string }[] = [
   { id: 'analysts', label: '分析师数据', description: '评分与预测数据' },
   { id: 'predictions', label: '预测验证', description: '预测、验证与回放' },
   { id: 'agent', label: 'Agent 与报告', description: '运行记录、日报与人工确认' },
+  { id: 'memory', label: '市场记忆', description: '活跃记忆与历史信号' },
+  { id: 'square', label: '广场热门', description: 'Gate 广场热帖与观点' },
   { id: 'settings', label: '系统设置', description: '调度任务与配置项' }
 ];
 
@@ -373,6 +497,14 @@ function horizonText(value: string): string {
 
 function statusText(value: string): string {
   return { pending: '待验证', success: '成功', failed: '失败', modified: '已改口' }[value] || value;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)) : [];
 }
 
 function qualityText(value?: string | null): string {
@@ -437,6 +569,14 @@ function changeTypeText(value?: string | null, record?: TargetChangeRecord): str
 
 function decisionText(value?: string): string {
   return { bullish: '偏多', bearish: '偏空', open_long: '偏多', open_short: '偏空', observe: '观望' }[value || ''] || value || '-';
+}
+
+function sentimentText(value?: string): string {
+  return { extreme_greed: '极度贪婪', greed: '贪婪', neutral: '中性', fear: '恐惧', extreme_fear: '极度恐惧', bullish: '看涨', bearish: '看跌', mixed: '混合' }[value || ''] || value || '-';
+}
+
+function memoryTypeText(value?: string): string {
+  return { market_sentiment_memory: '情绪信号', btc_trend_memory: 'BTC 趋势', btc_contract_memory: '合约信号', nasdaq_trend_memory: '纳指趋势', event_memory: '事件记忆', risk_memory: '风险信号' }[value || ''] || value || '-';
 }
 
 function Sparkline({ values }: { values: number[] }) {
@@ -507,6 +647,14 @@ export function App() {
   const [streamConnected, setStreamConnected] = useState(false);
   const [debugPanelCollapsed, setDebugPanelCollapsed] = useState(true);
   const [verifiedPredictionsExpanded, setVerifiedPredictionsExpanded] = useState(false);
+  const [btcContract, setBtcContract] = useState<BtcContract | null>(null);
+  const [sentiment, setSentiment] = useState<SentimentSnapshot | null>(null);
+  const [memories, setMemories] = useState<MarketMemory[]>([]);
+  const [squarePosts, setSquarePosts] = useState<SquarePost[]>([]);
+  const [nasdaqRows, setNasdaqRows] = useState<NasdaqRow[]>([]);
+  const [gateStatus, setGateStatus] = useState<GateSourceStatus | null>(null);
+  const [sourceAccounts, setSourceAccounts] = useState<SourceAccount[]>([]);
+  const [squareFilter, setSquareFilter] = useState<'all' | 'hot' | 'followed'>('all');
 
   const appendStreamEvent = (event: AgentStreamEvent) => {
     // 追加 SSE 事件并按 id 去重，只保留最近 80 条用于调试面板展示。
@@ -552,7 +700,14 @@ export function App() {
         reportData,
         verificationData,
         settingsData,
-        schedulerData
+        schedulerData,
+        contractData,
+        sentimentData,
+        memoryData,
+        squareData,
+        nasdaqData,
+        gateStatusData,
+        sourceAccountData
       ] = await Promise.all([
         requestJson<Dashboard>('/api/dashboard'),
         requestJson<MarketRow[]>(`/api/market?interval=${marketInterval}&limit=120`),
@@ -563,7 +718,14 @@ export function App() {
         requestJson<AgentReport[]>('/api/reports'),
         requestJson<VerificationResult[]>('/api/verification-results'),
         requestJson<{ items: SettingItem[] }>('/api/settings'),
-        requestJson<SchedulerStatus>('/api/scheduler/status')
+        requestJson<SchedulerStatus>('/api/scheduler/status'),
+        requestJson<BtcContract>('/api/market/btc-contract').catch(() => null),
+        requestJson<SentimentSnapshot>('/api/sentiment/market').catch(() => null),
+        requestJson<MarketMemory[]>('/api/memory?limit=50').catch(() => []),
+        requestJson<SquarePost[]>('/api/square/hot?limit=30').catch(() => []),
+        requestJson<NasdaqRow[]>('/api/market/nasdaq?symbol=IXIC&limit=8').catch(() => []),
+        requestJson<GateSourceStatus>('/api/sources/gate/status').catch(() => null),
+        requestJson<SourceAccount[]>('/api/sources/gate/accounts').catch(() => [])
       ]);
       setDashboard(dashboardData);
       setMarketRows(marketData);
@@ -576,6 +738,13 @@ export function App() {
       setVerificationResults(verificationData);
       setSettings(settingsData.items);
       setScheduler(schedulerData);
+      setBtcContract(contractData);
+      setSentiment(sentimentData);
+      setMemories(memoryData as MarketMemory[]);
+      setSquarePosts(squareData as SquarePost[]);
+      setNasdaqRows(nasdaqData as NasdaqRow[]);
+      setGateStatus(gateStatusData);
+      setSourceAccounts(sourceAccountData as SourceAccount[]);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '加载失败');
     } finally {
@@ -857,8 +1026,12 @@ export function App() {
   const loadAgentReplay = async (agentRunId: number) => {
     setLoading(true);
     try {
-      const result = await requestJson<AgentRunReplay>(`/api/agent/runs/${agentRunId}/replay`);
-      setAgentReplay(result);
+      const [result, evidence, reflection] = await Promise.all([
+        requestJson<AgentRunReplay>(`/api/agent/runs/${agentRunId}/replay`),
+        requestJson<AgentEvidence>(`/api/agent/runs/${agentRunId}/evidence`).catch(() => undefined),
+        requestJson<AgentReflection>(`/api/agent/runs/${agentRunId}/reflection`).catch(() => undefined)
+      ]);
+      setAgentReplay({ ...result, evidence, reflection });
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '加载 Agent 回放失败');
     } finally {
@@ -880,9 +1053,26 @@ export function App() {
     }
   };
 
+  const runGateSync = async (tasks: string[]) => {
+    setLoading(true);
+    try {
+      await requestJson<Record<string, unknown>>('/api/sources/gate/sync', {
+        method: 'POST',
+        body: JSON.stringify({ tasks })
+      });
+      setMessage(`Gate 数据同步完成：${tasks.join('、')}`);
+      await loadAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Gate 数据同步失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const market = dashboard?.market;
   const latestMarketRow = marketRows[marketRows.length - 1];
   const latestRun = dashboard?.latest_agent_run;
+  const latestNasdaq = nasdaqRows[0];
   const displayPrice = livePrice?.price || market?.latest_price;
   const liveSourceText = livePrice?.source === 'db_fallback' ? '数据库备用价' : livePrice?.source === 'unavailable' ? '实时源不可用' : livePrice?.source ? 'Binance 实时价' : '等待实时价格';
   const sortedPredictions = [...predictions].sort((left, right) => predictionTimeValue(left) - predictionTimeValue(right) || left.id - right.id);
@@ -928,7 +1118,36 @@ export function App() {
           <p>{run.market_summary}</p>
           <p>{run.opinion_summary}</p>
           <em>{run.output?.analysis_event || run.risk}</em>
-          <button className="ghost-button tiny" type="button" onClick={() => loadAgentReplay(run.id)} disabled={loading}>节点回放</button>
+          {run.output?.react_tools_used && run.output.react_tools_used.length > 0 && (
+            <div className="agent-tools-row">
+              <span className="agent-label">ReAct 工具</span>
+              {run.output.react_tools_used.map((tool) => <span className="tag sideways" key={tool}>{tool}</span>)}
+            </div>
+          )}
+          {run.output?.evidence_conflict?.has_conflict && (
+            <div className="agent-reflection-row conflict">
+              <span className="agent-label">证据冲突</span>
+              <span>{run.output.evidence_conflict.summary || '多源证据存在冲突'}</span>
+              {run.output.evidence_conflict.conflict_points?.map((point, i) => <em key={i}>{point}</em>)}
+            </div>
+          )}
+          {run.output?.reflection && !run.output.reflection.is_adequate && (
+            <div className="agent-reflection-row">
+              <span className="agent-label">反思修正</span>
+              <span>{run.output.reflection.correction_suggestion || '证据不充分'}</span>
+              {run.output.reflection.weak_points?.map((wp, i) => <em key={i}>{wp}</em>)}
+            </div>
+          )}
+          {(run.output?.nasdaq_context?.length || run.output?.gate_context_summary) && (
+            <div className="mini-grid agent-context-mini">
+              <span>Nasdaq {run.output?.nasdaq_context?.[0]?.symbol || '-'} {formatNumber(run.output?.nasdaq_context?.[0]?.change_pct)}%</span>
+              <span>工具结果 {formatNumber(Object.keys(run.output?.react_tool_results || {}).length, 0)} 项</span>
+              <span>冲突置信 {run.output?.evidence_conflict?.overall_confidence || '-'}</span>
+            </div>
+          )}
+          <div className="inline-actions">
+            <button className="ghost-button tiny" type="button" onClick={() => loadAgentReplay(run.id)} disabled={loading}>证据/反思/节点</button>
+          </div>
         </article>
       ))}
       {!agentRuns.length && <div className="empty">暂无 Agent 运行记录。</div>}
@@ -1056,6 +1275,84 @@ export function App() {
         <MetricCard title="Agent 最新动作" value={decisionText(latestRun?.decision)} desc={latestRun?.risk || '尚未运行'} icon={<ShieldAlert size={22} />} />
         <MetricCard title="分析师数量" value={formatNumber(analysts.length, 0)} desc={`Top 分 ${formatNumber(topAnalysts[0]?.total_score)} · 报告 ${formatNumber(reports.length, 0)} 篇`} icon={<LineChart size={22} />} />
       </section>
+
+      {activeView === 'overview' && (
+      <section className="gate-context-row">
+        <div className="gate-card">
+          <div className="gate-card-head">
+            <Database size={16} />
+            <strong>BTC 合约状态</strong>
+          </div>
+          {btcContract && btcContract.last_price ? (
+            <div className="gate-card-stats">
+              <span>标记价 ${formatNumber(btcContract.last_price)}</span>
+              <span>资金费率 {formatNumber(btcContract.funding_rate, 6)}</span>
+              <span>持仓量 {formatNumber(btcContract.open_interest, 0)}</span>
+              <span>24h {formatNumber(btcContract.change_pct_24h)}%</span>
+            </div>
+          ) : <div className="empty">暂无合约数据</div>}
+        </div>
+        <div className="gate-card">
+          <div className="gate-card-head">
+            <Flame size={16} />
+            <strong>市场情绪</strong>
+          </div>
+          {sentiment && sentiment.overall_sentiment ? (
+            <div className="gate-card-stats">
+              <span>情绪 {sentimentText(sentiment.overall_sentiment)}</span>
+              <span>看涨 {formatNumber((sentiment.bull_ratio || 0) * 100)}%</span>
+              <span>看跌 {formatNumber((sentiment.bear_ratio || 0) * 100)}%</span>
+              <span>快照 {formatDate(sentiment.snapshot_time)}</span>
+            </div>
+          ) : <div className="empty">暂无情绪快照</div>}
+        </div>
+        <div className="gate-card">
+          <div className="gate-card-head">
+            <BrainCircuit size={16} />
+            <strong>最新记忆 · {memories.length} 条</strong>
+          </div>
+          {memories.length ? (
+            <div className="gate-memory-list">
+              {memories.slice(0, 5).map((mem) => (
+                <div className="gate-memory-item" key={mem.id}>
+                  <span className={`tag ${mem.sentiment || ''}`}>{sentimentText(mem.sentiment)}</span>
+                  <span>{mem.title}</span>
+                  <em>{formatNumber(mem.importance, 2)}</em>
+                </div>
+              ))}
+            </div>
+          ) : <div className="empty">暂无市场记忆</div>}
+        </div>
+        <div className="gate-card">
+          <div className="gate-card-head">
+            <LineChart size={16} />
+            <strong>Nasdaq 风险偏好</strong>
+          </div>
+          {latestNasdaq ? (
+            <div className="gate-card-stats">
+              <span>{latestNasdaq.symbol} {formatNumber(latestNasdaq.price)}</span>
+              <span>涨跌 {formatNumber(latestNasdaq.change_pct)}%</span>
+              <span>盘态 {latestNasdaq.market_session || '-'}</span>
+              <span>更新 {formatDate(latestNasdaq.fetched_at)}</span>
+            </div>
+          ) : <div className="empty">暂无 Nasdaq 数据</div>}
+        </div>
+        <div className="gate-card">
+          <div className="gate-card-head">
+            <Database size={16} />
+            <strong>Gate 数据源状态</strong>
+          </div>
+          {gateStatus ? (
+            <div className="gate-card-stats">
+              {Object.entries(gateStatus).slice(0, 6).map(([key, value]) => {
+                const item = asRecord(value);
+                return <span key={key}>{key}：{formatNumber(Number(item.count || 0), 0)} · {formatDate(String(item.latest || ''))}</span>;
+              })}
+            </div>
+          ) : <div className="empty">暂无数据源状态</div>}
+        </div>
+      </section>
+      )}
 
       {activeView === 'overview' && (
       <section className="main-grid">
@@ -1291,6 +1588,12 @@ export function App() {
                 {report.data?.analyst_consensus && <p>{report.data.analyst_consensus}</p>}
                 {report.data?.recent_prediction_review && <p>{report.data.recent_prediction_review}</p>}
                 {report.data?.prediction_change_review && <p>{report.data.prediction_change_review}</p>}
+                {report.data?.contract_status && <p className="gate-report-line">{report.data.contract_status}</p>}
+                {report.data?.sentiment_status && <p className="gate-report-line">{report.data.sentiment_status}</p>}
+                {report.data?.memory_status && <p className="gate-report-line">{report.data.memory_status}</p>}
+                {report.data?.nasdaq_status && <p className="gate-report-line">{report.data.nasdaq_status}</p>}
+                {!!report.data?.sentiment_topics?.length && <p className="gate-report-line">情绪主题：{report.data.sentiment_topics.join('、')}</p>}
+                {!!report.data?.memory_summary?.length && <p className="gate-report-line">记忆摘要：{report.data.memory_summary.join('；')}</p>}
                 {reportScenarios(report.data?.scenarios).slice(0, 3).map((scenario, index) => (
                   <p key={`${report.id}-scenario-${index}`}><strong>{scenario.scenario || '情景'}</strong>：{scenario.description || '-'}</p>
                 ))}
@@ -1328,6 +1631,74 @@ export function App() {
         </div>
       </section>
 
+      <section className={activeView === 'memory' ? 'panel' : 'hidden'}>
+        <div className="panel-title compact">
+          <div>
+            <h2>市场记忆</h2>
+            <p>按重要性排序，展示 Agent 活跃记忆。共 {memories.length} 条。</p>
+          </div>
+          <BrainCircuit />
+        </div>
+        <div className="memory-grid">
+          {memories.map((mem) => (
+            <article className="memory-card" key={mem.id}>
+              <div className="memory-card-head">
+                <span className={`tag ${mem.sentiment || ''}`}>{memoryTypeText(mem.memory_type)}</span>
+                <span className="memory-importance">{formatNumber(mem.importance, 2)}</span>
+              </div>
+              <strong>{mem.title}</strong>
+              <p>{mem.content}</p>
+              <div className="memory-meta">
+                <span>情绪 {sentimentText(mem.sentiment)}</span>
+                {mem.expectation && <span>预期 {mem.expectation}</span>}
+                <span>来源 {mem.source || '-'}</span>
+                <span>{formatDate(mem.created_at)}</span>
+                {mem.valid_until && <span>有效至 {formatDate(mem.valid_until)}</span>}
+              </div>
+            </article>
+          ))}
+          {!memories.length && <div className="empty">暂无活跃市场记忆。可在"系统设置"中触发记忆压缩任务。</div>}
+        </div>
+      </section>
+
+      <section className={activeView === 'square' ? 'panel' : 'hidden'}>
+        <div className="panel-title compact">
+          <div>
+            <h2>广场热门</h2>
+            <p>Gate 广场热帖与关注用户观点。共 {squarePosts.length} 条。</p>
+          </div>
+          <div className="inline-actions">
+            <button className={`ghost-button tiny ${squareFilter === 'all' ? 'active-filter' : ''}`} type="button" onClick={() => setSquareFilter('all')}>全部</button>
+            <button className={`ghost-button tiny ${squareFilter === 'hot' ? 'active-filter' : ''}`} type="button" onClick={() => setSquareFilter('hot')}>热门</button>
+            <button className={`ghost-button tiny ${squareFilter === 'followed' ? 'active-filter' : ''}`} type="button" onClick={() => setSquareFilter('followed')}>关注</button>
+          </div>
+        </div>
+        <div className="square-list">
+          {squarePosts
+            .filter((post) => {
+              if (squareFilter === 'hot') return post.is_hot_post === 1;
+              if (squareFilter === 'followed') return post.is_followed_user === 1;
+              return true;
+            })
+            .map((post) => (
+            <article className="square-card" key={post.id}>
+              <div className="run-head">
+                <strong>{post.author || '匿名用户'}</strong>
+                <span>{formatDate(post.created_at)}</span>
+              </div>
+              <p>{post.content}</p>
+              <div className="square-meta">
+                {post.is_hot_post === 1 && <span className="tag bearish">🔥 热门</span>}
+                {post.is_followed_user === 1 && <span className="tag bullish">⭐ 关注</span>}
+                {post.hot_score != null && <span>热度 {formatNumber(post.hot_score, 0)}</span>}
+                {post.repost_count != null && <span>转发 {formatNumber(post.repost_count, 0)}</span>}
+              </div>
+            </article>
+          ))}
+          {!squarePosts.length && <div className="empty">暂无广场帖子。可在"系统设置"中触发广场同步任务。</div>}
+        </div>
+      </section>
+
       <section className={activeView === 'settings' ? 'two-columns' : 'hidden'}>
         <div className="panel">
           <div className="panel-title compact">
@@ -1341,6 +1712,8 @@ export function App() {
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('verify_due')} disabled={loading}>验证到期</button>
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('market_sync')} disabled={loading}>同步行情</button>
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('daily_report')} disabled={loading}>生成日报</button>
+            <button className="ghost-button" type="button" onClick={() => runGateSync(['gate_btc_contract_sync', 'nasdaq_index_sync', 'market_sentiment_build'])} disabled={loading}>同步 Gate/Nasdaq/情绪</button>
+            <button className="ghost-button" type="button" onClick={() => runGateSync(['gate_square_hot_sync', 'gate_square_user_sync'])} disabled={loading}>同步 Square</button>
           </div>
           <div className="run-list">
             {(scheduler?.jobs || []).map((job) => (
@@ -1351,6 +1724,47 @@ export function App() {
                 </div>
               </article>
             ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-title compact">
+            <div>
+              <h2>Gate 数据源与账户映射</h2>
+              <p>展示 Gate/Nasdaq 同步状态与 Square 指定用户映射。</p>
+            </div>
+            <Database />
+          </div>
+          {gateStatus ? (
+            <div className="settings-grid source-status-grid">
+              {Object.entries(gateStatus).map(([key, value]) => {
+                const item = asRecord(value);
+                return (
+                  <div className="setting-item" key={key}>
+                    <strong>{key}</strong>
+                    <span>{formatNumber(Number(item.count || 0), 0)} 条</span>
+                    <small>最新 {formatDate(String(item.latest || ''))}</small>
+                  </div>
+                );
+              })}
+            </div>
+          ) : <div className="empty">暂无数据源状态。</div>}
+          <div className="run-list source-account-list">
+            {sourceAccounts.map((account, index) => (
+              <article className="run-card" key={`${account.source_platform || 'source'}-${account.source_user_id || index}`}>
+                <div className="run-head">
+                  <strong>{account.display_name || account.source_user_id || '未命名账户'}</strong>
+                  <span>{account.enabled ? '启用' : '停用'}</span>
+                </div>
+                <div className="mini-grid">
+                  <span>平台 {account.source_platform || '-'}</span>
+                  <span>用户 {account.source_user_id || '-'}</span>
+                  <span>分析师 ID {account.analyst_id ?? '-'}</span>
+                  <span>创建 {formatDate(account.created_at)}</span>
+                </div>
+              </article>
+            ))}
+            {!sourceAccounts.length && <div className="empty">暂无 Square 指定用户映射。</div>}
           </div>
         </div>
 
@@ -1501,6 +1915,16 @@ export function App() {
               </div>
             </div>
           )}
+          {selectedVerification.report?.data?.context_snapshot && (
+            <div className="context-snapshot">
+              <h3>验证环境快照</h3>
+              <div className="mini-grid">
+                <span>Gate 上下文 {Object.keys(asRecord(selectedVerification.report.data.context_snapshot.gate_context)).length} 项</span>
+                <span>市场摘要 {Object.keys(asRecord(selectedVerification.report.data.context_snapshot.market_summary)).length} 项</span>
+              </div>
+              <pre>{JSON.stringify(selectedVerification.report.data.context_snapshot, null, 2)}</pre>
+            </div>
+          )}
         </section>
       )}
 
@@ -1553,6 +1977,24 @@ export function App() {
               <p>节点数 {agentReplay.nodes?.length || 0}</p>
             </div>
             <button className="ghost-button" type="button" onClick={() => setAgentReplay(null)}>关闭</button>
+          </div>
+          <div className="detail-grid">
+            <div>
+              <h3>Evidence</h3>
+              <div className="mini-grid">
+                <span>证据引用 {(agentReplay.evidence?.evidence_refs || []).length} 条</span>
+                <span>节点快照 {(agentReplay.evidence?.node_runs || []).length} 个</span>
+              </div>
+              <pre>{JSON.stringify(agentReplay.evidence || {}, null, 2)}</pre>
+            </div>
+            <div>
+              <h3>Reflection</h3>
+              <div className="mini-grid">
+                <span>充分性 {String(asRecord(agentReplay.reflection?.reflection).is_adequate ?? '-')}</span>
+                <span>节点 {(agentReplay.reflection?.node_runs || []).length} 个</span>
+              </div>
+              <pre>{JSON.stringify(agentReplay.reflection || {}, null, 2)}</pre>
+            </div>
           </div>
           <div className="run-list">
             {(agentReplay.nodes || []).map((node) => (

@@ -1,0 +1,39 @@
+{
+  "system": [
+    "你负责判断多源证据之间的冲突程度和可信度。",
+    "当行情、观点、情绪和记忆之间存在矛盾时，给出冲突评估和可信度排序。"
+  ],
+  "user_template": [
+    "【输入】",
+    "行情信号：",
+    "{market_signal}",
+    "",
+    "分析师观点：",
+    "{analyst_opinions}",
+    "",
+    "情绪快照：",
+    "{sentiment_snapshot}",
+    "",
+    "市场记忆：",
+    "{market_memories}",
+    "",
+    "【任务】",
+    "判断上述证据之间是否存在冲突，评估各来源可信度。",
+    "",
+    "【规则】",
+    "- 必须逐项说明冲突点。",
+    "- 给出综合可信度评估。",
+    "- 不得给出投资建议。",
+    "",
+    "【输出】",
+    "请输出标准 JSON，data 字段包含：has_conflict、conflict_points、source_credibility、overall_confidence、recommended_weight_adjustments、summary。"
+  ],
+  "output_schema": {
+    "has_conflict": false,
+    "conflict_points": [],
+    "source_credibility": {},
+    "overall_confidence": "high|medium|low",
+    "recommended_weight_adjustments": {},
+    "summary": "string"
+  }
+}

@@ -828,6 +828,50 @@
           "risk_notes": []
         }
       },
+      "react_tool_selection": {
+        "system": [
+          "你负责为市场分析 Agent 选择需要调用的只读研究工具。",
+          "只能从输入的 tool_catalog 中选择工具，不得编造工具名。",
+          "如果证据已经足够或无需补充，选择 no_tool。"
+        ],
+        "user_template": [
+          "【输入】",
+          "证据缺口：",
+          "{evidence_gaps}",
+          "",
+          "当前市场摘要：",
+          "{market_summary}",
+          "",
+          "分析信号：",
+          "{analysis_signal}",
+          "",
+          "Gate/Nasdaq 上下文：",
+          "{gate_context}",
+          "",
+          "可用工具目录：",
+          "{tool_catalog}",
+          "",
+          "【任务】",
+          "选择最少但足够的工具来补齐证据。",
+          "",
+          "【规则】",
+          "- 只能选择 tool_catalog 中的 name，或 no_tool。",
+          "- 工具只用于只读研究，不得提出交易、账户或下单动作。",
+          "- 如果缺少技术面/链上/币种信息，可选择 gate_info_research。",
+          "- 如果缺少合约行情/K线，选择 gate_market_research。",
+          "- 如果缺少新闻/宏观叙事，选择 gate_news_research。",
+          "- 如果缺少社交情绪/指定用户观点，选择 gate_square_research。",
+          "- 如果缺少历史记忆，选择 market_memory_search。",
+          "",
+          "【输出】",
+          "请输出标准 JSON，data 字段包含：selected_tools、selection_reason、expected_evidence。"
+        ],
+        "output_schema": {
+          "selected_tools": [],
+          "selection_reason": "string",
+          "expected_evidence": []
+        }
+      },
       "display_translation": {
         "system": [
           "你负责把 AI 节点输出中需要展示给用户的英文内容翻译成中文。",
