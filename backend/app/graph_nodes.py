@@ -594,14 +594,10 @@ def _build_gate_context(conn: sqlite3.Connection) -> dict[str, Any]:
     """构建 Gate MCP 增强上下文（合约/情绪/记忆），供 Agent 各流程复用。"""
     try:
         from .gate_mcp import latest_btc_contract_metrics, latest_sentiment_snapshot, active_market_memories
-        nasdaq_rows = conn.execute(
-            "SELECT * FROM nasdaq_market_data ORDER BY fetched_at DESC LIMIT 8"
-        ).fetchall()
         gate_ctx: dict[str, Any] = {
             "contract_metrics": latest_btc_contract_metrics(conn),
             "sentiment_snapshot": latest_sentiment_snapshot(conn),
             "active_memories": active_market_memories(conn, limit=10),
-            "nasdaq_context": rows_to_dicts(nasdaq_rows),
         }
     except Exception:
         gate_ctx = {}
@@ -617,14 +613,12 @@ def load_agent_analysis_context_node(state: dict[str, Any]) -> dict[str, Any]:
     state["market"] = summary
     state["pending_predictions"] = predictions
     state["gate_context"] = gate_ctx
-    state["nasdaq_context"] = gate_ctx.get("nasdaq_context", [])
     state["react_tools_used"] = []
     state["react_tool_results"] = {}
     output = standard_node_output("load_agent_analysis_context", {
         "market": summary,
         "pending_prediction_count": len(predictions),
         "gate_context_available": bool(gate_ctx.get("contract_metrics")),
-        "nasdaq_context_available": bool(gate_ctx.get("nasdaq_context")),
     })
     return apply_node_output(state, "load_agent_analysis_context", output, {"focus_prediction_ids": state.get("focus_prediction_ids", [])})
 
@@ -839,7 +833,6 @@ def evidence_conflict_judgement_node(state: dict[str, Any]) -> dict[str, Any]:
         "signal": state.get("signal", {}),
         "decision": state.get("decision"),
         "risk": state.get("risk"),
-        "nasdaq_context": gate_ctx.get("nasdaq_context", []),
         "react_tool_results": state.get("react_tool_results", {}),
     }
     analyst_opinions = state.get("pending_predictions", [])[:20]
@@ -962,7 +955,6 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
         "focus_prediction_ids": state.get("focus_prediction_ids", []),
         "graph": "agent_analysis",
         "gate_context": state.get("gate_context", {}),
-        "nasdaq_context": state.get("nasdaq_context", []),
         "node_outputs": state.get("node_outputs", {}),
     }
     output_snapshot = {
@@ -975,7 +967,6 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
         "react_tool_results": state.get("react_tool_results", {}),
         "evidence_conflict": state.get("evidence_conflict", {}),
         "gate_context_summary": state.get("gate_context", {}),
-        "nasdaq_context": state.get("nasdaq_context", []),
         "reflection": state.get("reflection", {}),
     }
     cursor = conn.execute(
@@ -1027,7 +1018,6 @@ def finalize_agent_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
         "react_tool_results": state.get("react_tool_results", {}),
         "evidence_conflict": state.get("evidence_conflict", {}),
         "gate_context_summary": state.get("gate_context", {}),
-        "nasdaq_context": state.get("nasdaq_context", []),
         "reflection": state.get("reflection", {}),
     }
     state["conn"].execute("UPDATE agent_runs SET output_snapshot = ? WHERE id = ?", (as_json(output_snapshot), state["agent_run_id"]))
@@ -1212,7 +1202,6 @@ def load_daily_report_context_node(state: dict[str, Any]) -> dict[str, Any]:
     state["top_analysts"] = context["top_analysts"]
     state["report_context"] = context
     state["gate_context"] = gate_ctx
-    state["nasdaq_context"] = gate_ctx.get("nasdaq_context", [])
     output = standard_node_output(
         "load_daily_report_context",
         {
@@ -1348,7 +1337,6 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
     contract_status = ""
     sentiment_status = ""
     memory_status = ""
-    nasdaq_status = ""
     sentiment_topics: list[str] = []
     if gate_ctx.get("contract_metrics"):
         cm = gate_ctx["contract_metrics"]
@@ -1363,10 +1351,6 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
     if gate_ctx.get("active_memories"):
         mems = gate_ctx["active_memories"]
         memory_status = f"活跃记忆 {len(mems)} 条"
-    if gate_ctx.get("nasdaq_context"):
-        nasdaq_items = gate_ctx["nasdaq_context"]
-        first = nasdaq_items[0]
-        nasdaq_status = f"纳指相关 — {first.get('symbol')} 最新 {first.get('price')}, change_pct: {first.get('change_pct')}"
     fallback = {
         "title": "BTC 每日市场观察",
         "executive_summary": market_summary_data.get("market_summary", "暂无市场摘要"),
@@ -1387,7 +1371,6 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
         "contract_status": contract_status,
         "sentiment_status": sentiment_status,
         "memory_status": memory_status,
-        "nasdaq_status": nasdaq_status,
         "sentiment_topics": sentiment_topics,
         "memory_summary": [item.get("title") for item in gate_ctx.get("active_memories", [])[:5]],
         "generated_at": utc_now(),

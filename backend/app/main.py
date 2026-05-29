@@ -55,7 +55,6 @@ from .gate_mcp import (
     active_market_memories,
     gate_mcp_source_status,
     latest_btc_contract_metrics,
-    latest_nasdaq_data,
     latest_sentiment_snapshot,
     list_analyst_source_accounts,
     recent_followed_user_posts,
@@ -470,7 +469,7 @@ def post_gate_sync(
         "gate_btc_contract_sync", "gate_news_sync",
         "gate_square_hot_sync", "market_sentiment_build",
         "market_memory_compact", "gate_square_user_sync",
-        "gate_info_sync", "nasdaq_index_sync",
+        "gate_info_sync",
     }
     results: dict[str, object] = {}
     for task in payload.tasks:
@@ -536,15 +535,6 @@ def post_memory(
 # ---------------------------------------------------------------------------
 # Phase A: 新增 API 端点
 # ---------------------------------------------------------------------------
-
-@app.get("/api/market/nasdaq")
-def get_nasdaq(
-    symbol: str = Query(default="IXIC"),
-    limit: int = Query(default=5, ge=1, le=50),
-    db: sqlite3.Connection = Depends(get_db),
-) -> list[dict[str, object]]:
-    return latest_nasdaq_data(db, symbol=symbol, limit=limit)
-
 
 @app.get("/api/square/user-opinions")
 def get_square_user_opinions(

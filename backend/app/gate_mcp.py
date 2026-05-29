@@ -690,100 +690,6 @@ def sync_gate_news(conn: sqlite3.Connection, client: GateMCPClient | None = None
     return {"synced": True, "source": "gate_mcp_news", "keywords": keyword_str}
 
 
-def sync_nasdaq_data(conn: sqlite3.Connection) -> dict[str, Any]:
-    from .services import get_setting_value
-
-    symbols = get_setting_value(conn, "nasdaq.symbols", ["IXIC", "NDX", "QQQ", "NQ"])
-    if isinstance(symbols, str):
-        try:
-            symbols = json.loads(symbols)
-        except (json.JSONDecodeError, TypeError):
-            symbols = [item.strip() for item in symbols.split(",") if item.strip()]
-    symbol_map = {"IXIC": "^IXIC", "NDX": "^NDX", "QQQ": "QQQ", "NQ": "NQ=F"}
-    requested = [str(item).upper() for item in symbols if str(item).strip()]
-    yahoo_symbols = ",".join(symbol_map.get(item, item) for item in requested)
-    if not yahoo_symbols:
-        return {"synced": False, "reason": "no nasdaq symbols configured"}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    payload: dict[str, Any] = {}
-    last_exc: Exception | None = None
-    for attempt in range(3):
-        try:
-            with httpx.Client(timeout=20) as client:
-                response = client.get(YAHOO_QUOTE_URL, params={"symbols": yahoo_symbols}, headers=headers)
-                response.raise_for_status()
-                payload = response.json()
-                break
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429:
-                wait = 2 ** attempt + 1
-                logger.warning("Nasdaq data sync got 429, retrying in %ds (attempt %d/3)", wait, attempt + 1)
-                time.sleep(wait)
-                last_exc = exc
-                continue
-            logger.warning("Nasdaq data sync failed: %s", exc)
-            return {"synced": False, "error": str(exc)}
-        except Exception as exc:
-            logger.warning("Nasdaq data sync failed: %s", exc)
-            return {"synced": False, "error": str(exc)}
-    else:
-        if last_exc:
-            return {"synced": False, "error": str(last_exc)}
-        return {"synced": False, "error": "unknown error after retries"}
-
-    rows = ((payload.get("quoteResponse") or {}).get("result") or [])
-    now = utc_now()
-    fetched_at = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
-    synced = 0
-    reverse_map = {value: key for key, value in symbol_map.items()}
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-        raw_symbol = str(item.get("symbol") or "")
-        symbol = reverse_map.get(raw_symbol, raw_symbol.replace("^", ""))
-        price = _float(item.get("regularMarketPrice"))
-        if not symbol or price is None:
-            continue
-        conn.execute(
-            """
-            INSERT INTO nasdaq_market_data (
-                symbol, price, open, high, low, close, volume,
-                change_pct, source, market_session, payload, fetched_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'yahoo_finance', ?, ?, ?, ?)
-            ON CONFLICT(symbol, fetched_at) DO UPDATE SET
-                price = excluded.price,
-                open = excluded.open,
-                high = excluded.high,
-                low = excluded.low,
-                close = excluded.close,
-                volume = excluded.volume,
-                change_pct = excluded.change_pct,
-                market_session = excluded.market_session,
-                payload = excluded.payload,
-                created_at = excluded.created_at
-            """,
-            (
-                symbol,
-                price,
-                _float(item.get("regularMarketOpen")),
-                _float(item.get("regularMarketDayHigh")),
-                _float(item.get("regularMarketDayLow")),
-                price,
-                _float(item.get("regularMarketVolume")),
-                _float(item.get("regularMarketChangePercent")),
-                item.get("marketState"),
-                json.dumps(item, ensure_ascii=False, default=str),
-                fetched_at,
-                now,
-            ),
-        )
-        synced += 1
-    conn.commit()
-    return {"synced": True, "count": synced, "symbols": requested, "fetched_at": fetched_at}
-
-
 # ---------------------------------------------------------------------------
 # Gate Square 热门同步
 # ---------------------------------------------------------------------------
@@ -931,10 +837,6 @@ def build_market_sentiment_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         """
     ).fetchall()
     news_summary = [{key: row[key] for key in row.keys()} for row in news_rows]
-    nasdaq_rows = conn.execute(
-        "SELECT * FROM nasdaq_market_data ORDER BY fetched_at DESC LIMIT 8"
-    ).fetchall()
-    nasdaq_context = [{key: row[key] for key in row.keys()} for row in nasdaq_rows]
     memory_rows = conn.execute(
         """
         SELECT memory_type, title, content, sentiment, importance, created_at
@@ -977,7 +879,6 @@ def build_market_sentiment_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         "contract_metrics": metrics,
         "square_posts": square_posts,
         "news_summary": news_summary,
-        "nasdaq_context": nasdaq_context,
         "memory_context": memory_context,
         "rule_based": True,
     }
@@ -988,7 +889,6 @@ def build_market_sentiment_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
             "news_summary": news_summary,
             "market_indicators": {
                 "btc_contract": metrics,
-                "nasdaq": nasdaq_context,
                 "memories": memory_context,
             },
         })
@@ -1189,7 +1089,6 @@ def compact_market_memories(conn: sqlite3.Connection) -> dict[str, Any]:
         "market_sentiment_memory": 6,
         "btc_trend_memory": 24,
         "btc_contract_memory": 12,
-        "nasdaq_trend_memory": 24,
         "event_memory": 72,
         "risk_memory": 24,
     }
@@ -1624,15 +1523,6 @@ def list_analyst_source_accounts(conn: sqlite3.Connection) -> list[dict[str, Any
     return [{key: row[key] for key in row.keys()} for row in rows]
 
 
-def latest_nasdaq_data(conn: sqlite3.Connection, symbol: str = "IXIC", limit: int = 1) -> list[dict[str, Any]]:
-    """返回最新纳指行情数据。"""
-    rows = conn.execute(
-        "SELECT * FROM nasdaq_market_data WHERE symbol = ? ORDER BY fetched_at DESC LIMIT ?",
-        (symbol, limit),
-    ).fetchall()
-    return [{key: row[key] for key in row.keys()} for row in rows]
-
-
 def gate_mcp_source_status(conn: sqlite3.Connection) -> dict[str, Any]:
     """返回 Gate MCP 数据源的整体状态摘要。"""
     btc = conn.execute(
@@ -1656,9 +1546,6 @@ def gate_mcp_source_status(conn: sqlite3.Connection) -> dict[str, Any]:
     followed_posts = conn.execute(
         "SELECT COUNT(*) AS count, MAX(fetched_at) AS latest FROM gate_square_posts WHERE is_followed_user = 1"
     ).fetchone()
-    nasdaq = conn.execute(
-        "SELECT COUNT(*) AS count, MAX(fetched_at) AS latest FROM nasdaq_market_data"
-    ).fetchone()
     return {
         "btc_contract_metrics": {"count": btc["count"] if btc else 0, "latest": btc["latest"] if btc else None},
         "sentiment_snapshots": {"count": sentiment["count"] if sentiment else 0, "latest": sentiment["latest"] if sentiment else None},
@@ -1667,7 +1554,6 @@ def gate_mcp_source_status(conn: sqlite3.Connection) -> dict[str, Any]:
         "active_memories": {"count": memories["count"] if memories else 0},
         "analyst_source_accounts": {"count": source_accounts["count"] if source_accounts else 0},
         "followed_user_posts": {"count": followed_posts["count"] if followed_posts else 0, "latest": followed_posts["latest"] if followed_posts else None},
-        "nasdaq_market_data": {"count": nasdaq["count"] if nasdaq else 0, "latest": nasdaq["latest"] if nasdaq else None},
     }
 
 

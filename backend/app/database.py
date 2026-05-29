@@ -69,10 +69,8 @@ DEFAULT_SETTINGS: dict[str, tuple[Any, str, str]] = {
     "scheduler.memory_compact_hours": (6, "int", "市场记忆压缩间隔小时数"),
     "scheduler.gate_info_sync_minutes": (30, "int", "Gate Info 技术面同步间隔分钟数"),
     "scheduler.gate_square_user_sync_minutes": (15, "int", "Gate Square 指定用户观点同步间隔分钟数"),
-    "scheduler.nasdaq_sync_minutes": (30, "int", "纳斯达克指数同步间隔分钟数"),
-    "nasdaq.symbols": (["IXIC", "NDX", "QQQ", "NQ"], "json", "纳斯达克相关指数/ETF/期货符号列表"),
     "square.followed_users": ([], "json", "Gate 广场关注用户列表 [{source_user_id, display_name}]"),
-    "news.keywords": (["BTC", "Bitcoin", "Nasdaq", "FOMC", "CPI", "Fed"], "json", "新闻采集关键词列表"),
+    "news.keywords": (["BTC", "Bitcoin", "FOMC", "CPI", "Fed"], "json", "新闻采集关键词列表"),
 }
 
 # PostgreSQL 包装层需要对这些表的 INSERT 自动追加 RETURNING id。
@@ -93,7 +91,6 @@ ID_TABLES = {
     "scheduled_task_runs",
     "gate_mcp_raw_records",
     "btc_contract_metrics",
-    "nasdaq_market_data",
     "gate_square_posts",
     "market_sentiment_snapshots",
     "market_memories",
@@ -532,22 +529,6 @@ def ensure_gate_square_posts_phase_a_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def ensure_nasdaq_market_data_phase_b_columns(conn: sqlite3.Connection) -> None:
-    existing = table_columns(conn, "nasdaq_market_data")
-    columns: dict[str, str] = {
-        "open": "REAL",
-        "high": "REAL",
-        "low": "REAL",
-        "close": "REAL",
-        "volume": "REAL",
-        "market_session": "TEXT",
-    }
-    for name, definition in columns.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE nasdaq_market_data ADD COLUMN {name} {definition}")
-    conn.commit()
-
-
 def init_db() -> None:
     # 创建所有业务表、索引，并执行必要的兼容迁移和种子数据写入。
     with connect() as conn:
@@ -811,24 +792,6 @@ def init_db() -> None:
                 UNIQUE(symbol, fetched_at)
             );
 
-            CREATE TABLE IF NOT EXISTS nasdaq_market_data (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                price REAL,
-                open REAL,
-                high REAL,
-                low REAL,
-                close REAL,
-                volume REAL,
-                change_pct REAL,
-                source TEXT NOT NULL,
-                market_session TEXT,
-                payload TEXT NOT NULL DEFAULT '{}',
-                fetched_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(symbol, fetched_at)
-            );
-
             CREATE TABLE IF NOT EXISTS gate_square_posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 post_id TEXT NOT NULL UNIQUE,
@@ -879,7 +842,6 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_gate_mcp_raw_endpoint ON gate_mcp_raw_records(endpoint, tool_name, created_at);
             CREATE INDEX IF NOT EXISTS idx_btc_contract_metrics_symbol ON btc_contract_metrics(symbol, fetched_at);
-            CREATE INDEX IF NOT EXISTS idx_nasdaq_market_data_symbol ON nasdaq_market_data(symbol, fetched_at);
             CREATE INDEX IF NOT EXISTS idx_gate_square_posts_time ON gate_square_posts(publish_time);
             CREATE INDEX IF NOT EXISTS idx_sentiment_snapshots_symbol ON market_sentiment_snapshots(symbol, snapshot_time);
             CREATE INDEX IF NOT EXISTS idx_market_memories_active ON market_memories(is_active, memory_type, symbol);
@@ -905,7 +867,6 @@ def init_db() -> None:
         ensure_market_memories_phase_a_columns(conn)
         ensure_sentiment_snapshot_phase_a_columns(conn)
         ensure_gate_square_posts_phase_a_columns(conn)
-        ensure_nasdaq_market_data_phase_b_columns(conn)
         seed_default_settings(conn)
         conn.commit()
         seed_market_data(conn)

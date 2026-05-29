@@ -122,7 +122,6 @@ def start_scheduler() -> None:
         memory_compact_hours = int(get_setting_value(conn2, "scheduler.memory_compact_hours", 6))
         gate_info_minutes = int(get_setting_value(conn2, "scheduler.gate_info_sync_minutes", 30))
         gate_square_user_minutes = int(get_setting_value(conn2, "scheduler.gate_square_user_sync_minutes", 15))
-        nasdaq_minutes = int(get_setting_value(conn2, "scheduler.nasdaq_sync_minutes", 30))
     finally:
         conn2.close()
     if enabled and gate_mcp_enabled:
@@ -133,7 +132,6 @@ def start_scheduler() -> None:
         scheduler.add_job(_run_task, "interval", hours=max(1, memory_compact_hours), args=["market_memory_compact"], id="market_memory_compact", replace_existing=True)
         scheduler.add_job(_run_task, "interval", minutes=max(5, gate_info_minutes), args=["gate_info_sync"], id="gate_info_sync", replace_existing=True)
         scheduler.add_job(_run_task, "interval", minutes=max(5, gate_square_user_minutes), args=["gate_square_user_sync"], id="gate_square_user_sync", replace_existing=True)
-        scheduler.add_job(_run_task, "interval", minutes=max(5, nasdaq_minutes), args=["nasdaq_index_sync"], id="nasdaq_index_sync", replace_existing=True)
     schedule_next_due_verification()
     scheduler.start()
 

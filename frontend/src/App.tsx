@@ -78,7 +78,6 @@ type AgentRun = {
       summary?: string;
     };
     gate_context_summary?: Record<string, unknown>;
-    nasdaq_context?: NasdaqRow[];
     reflection?: {
       is_adequate?: boolean;
       weak_points?: string[];
@@ -203,7 +202,6 @@ type AgentReport = {
     contract_status?: string;
     sentiment_status?: string;
     memory_status?: string;
-    nasdaq_status?: string;
     sentiment_topics?: string[];
     memory_summary?: string[];
     risk_warnings?: string[];
@@ -280,21 +278,6 @@ type BtcContract = {
   high_24h?: number;
   low_24h?: number;
   volume_24h?: number;
-  [key: string]: unknown;
-};
-
-type NasdaqRow = {
-  id?: number;
-  symbol: string;
-  price?: number;
-  open?: number | null;
-  high?: number | null;
-  low?: number | null;
-  close?: number | null;
-  volume?: number | null;
-  change_pct?: number | null;
-  market_session?: string | null;
-  fetched_at?: string;
   [key: string]: unknown;
 };
 
@@ -544,8 +527,7 @@ function gateTaskText(task: string): string {
     gate_square_user_sync: 'Square 关注',
     gate_info_sync: 'Gate Info',
     market_sentiment_build: '市场情绪',
-    market_memory_compact: '市场记忆',
-    nasdaq_index_sync: 'Nasdaq'
+    market_memory_compact: '市场记忆'
   }[task] || task;
 }
 
@@ -624,7 +606,7 @@ function sentimentText(value?: string): string {
 }
 
 function memoryTypeText(value?: string): string {
-  return { market_sentiment_memory: '情绪信号', btc_trend_memory: 'BTC 趋势', btc_contract_memory: '合约信号', nasdaq_trend_memory: '纳指趋势', event_memory: '事件记忆', risk_memory: '风险信号' }[value || ''] || value || '-';
+  return { market_sentiment_memory: '情绪信号', btc_trend_memory: 'BTC 趋势', btc_contract_memory: '合约信号', event_memory: '事件记忆', risk_memory: '风险信号' }[value || ''] || value || '-';
 }
 
 function Sparkline({ values }: { values: number[] }) {
@@ -701,7 +683,6 @@ export function App() {
   const [sentiment, setSentiment] = useState<SentimentSnapshot | null>(null);
   const [memories, setMemories] = useState<MarketMemory[]>([]);
   const [squarePosts, setSquarePosts] = useState<SquarePost[]>([]);
-  const [nasdaqRows, setNasdaqRows] = useState<NasdaqRow[]>([]);
   const [gateStatus, setGateStatus] = useState<GateSourceStatus | null>(null);
   const [sourceAccounts, setSourceAccounts] = useState<SourceAccount[]>([]);
   const [squareFilter, setSquareFilter] = useState<'all' | 'hot' | 'followed'>('all');
@@ -755,7 +736,6 @@ export function App() {
         sentimentData,
         memoryData,
         squareData,
-        nasdaqData,
         gateStatusData,
         sourceAccountData
       ] = await Promise.all([
@@ -773,7 +753,6 @@ export function App() {
         requestJson<SentimentSnapshot>('/api/sentiment/market').catch(() => null),
         requestJson<MarketMemory[]>('/api/memory?limit=50').catch(() => []),
         requestJson<SquarePost[]>('/api/square/hot?limit=30').catch(() => []),
-        requestJson<NasdaqRow[]>('/api/market/nasdaq?symbol=IXIC&limit=8').catch(() => []),
         requestJson<GateSourceStatus>('/api/sources/gate/status').catch(() => null),
         requestJson<SourceAccount[]>('/api/sources/gate/accounts').catch(() => [])
       ]);
@@ -792,7 +771,6 @@ export function App() {
       setSentiment(sentimentData);
       setMemories(memoryData as MarketMemory[]);
       setSquarePosts(squareData as SquarePost[]);
-      setNasdaqRows(nasdaqData as NasdaqRow[]);
       setGateStatus(gateStatusData);
       setSourceAccounts(sourceAccountData as SourceAccount[]);
     } catch (error) {
@@ -1145,7 +1123,6 @@ export function App() {
   const market = dashboard?.market;
   const latestMarketRow = marketRows[marketRows.length - 1];
   const latestRun = dashboard?.latest_agent_run;
-  const latestNasdaq = nasdaqRows[0];
   const displayPrice = livePrice?.price || market?.latest_price;
   const liveSourceText = livePrice?.source === 'db_fallback' ? '数据库备用价' : livePrice?.source === 'unavailable' ? '实时源不可用' : livePrice?.source ? 'Binance 实时价' : '等待实时价格';
   const sortedPredictions = [...predictions].sort((left, right) => predictionTimeValue(left) - predictionTimeValue(right) || left.id - right.id);
@@ -1209,13 +1186,6 @@ export function App() {
               <span className="agent-label">反思修正</span>
               <span>{run.output.reflection.correction_suggestion || '证据不充分'}</span>
               {run.output.reflection.weak_points?.map((wp, i) => <em key={i}>{wp}</em>)}
-            </div>
-          )}
-          {(run.output?.nasdaq_context?.length || run.output?.gate_context_summary) && (
-            <div className="mini-grid agent-context-mini">
-              <span>Nasdaq {run.output?.nasdaq_context?.[0]?.symbol || '-'} {formatNumber(run.output?.nasdaq_context?.[0]?.change_pct)}%</span>
-              <span>工具结果 {formatNumber(Object.keys(run.output?.react_tool_results || {}).length, 0)} 项</span>
-              <span>冲突置信 {run.output?.evidence_conflict?.overall_confidence || '-'}</span>
             </div>
           )}
           <div className="inline-actions">
@@ -1406,20 +1376,6 @@ export function App() {
               ))}
             </div>
           ) : <div className="empty">暂无市场记忆</div>}
-        </div>
-        <div className="gate-card">
-          <div className="gate-card-head">
-            <LineChart size={16} />
-            <strong>Nasdaq 风险偏好</strong>
-          </div>
-          {latestNasdaq ? (
-            <div className="gate-card-stats">
-              <span>{latestNasdaq.symbol} {formatNumber(latestNasdaq.price)}</span>
-              <span>涨跌 {formatNumber(latestNasdaq.change_pct)}%</span>
-              <span>盘态 {latestNasdaq.market_session || '-'}</span>
-              <span>更新 {formatDate(latestNasdaq.fetched_at)}</span>
-            </div>
-          ) : <div className="empty">暂无 Nasdaq 数据</div>}
         </div>
         <div className="gate-card">
           <div className="gate-card-head">
@@ -1675,7 +1631,6 @@ export function App() {
                 {report.data?.contract_status && <p className="gate-report-line">{report.data.contract_status}</p>}
                 {report.data?.sentiment_status && <p className="gate-report-line">{report.data.sentiment_status}</p>}
                 {report.data?.memory_status && <p className="gate-report-line">{report.data.memory_status}</p>}
-                {report.data?.nasdaq_status && <p className="gate-report-line">{report.data.nasdaq_status}</p>}
                 {!!report.data?.sentiment_topics?.length && <p className="gate-report-line">情绪主题：{report.data.sentiment_topics.join('、')}</p>}
                 {!!report.data?.memory_summary?.length && <p className="gate-report-line">记忆摘要：{report.data.memory_summary.join('；')}</p>}
                 {reportScenarios(report.data?.scenarios).slice(0, 3).map((scenario, index) => (
@@ -1796,7 +1751,7 @@ export function App() {
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('verify_due')} disabled={loading}>验证到期</button>
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('market_sync')} disabled={loading}>同步行情</button>
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('daily_report')} disabled={loading}>生成日报</button>
-            <button className="ghost-button" type="button" onClick={() => runGateSync(['gate_btc_contract_sync', 'nasdaq_index_sync', 'market_sentiment_build'])} disabled={loading}>同步 Gate/Nasdaq/情绪</button>
+            <button className="ghost-button" type="button" onClick={() => runGateSync(['gate_btc_contract_sync', 'market_sentiment_build'])} disabled={loading}>同步 Gate/情绪</button>
             <button className="ghost-button" type="button" onClick={() => runGateSync(['gate_square_hot_sync', 'gate_square_user_sync'])} disabled={loading}>同步 Square</button>
           </div>
           <div className="run-list">
@@ -1815,7 +1770,7 @@ export function App() {
           <div className="panel-title compact">
             <div>
               <h2>Gate 数据源与账户映射</h2>
-              <p>展示 Gate/Nasdaq 同步状态与 Square 指定用户映射。</p>
+              <p>展示 Gate 同步状态与 Square 指定用户映射。</p>
             </div>
             <Database />
           </div>

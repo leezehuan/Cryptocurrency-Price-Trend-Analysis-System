@@ -845,7 +845,7 @@
           "分析信号：",
           "{analysis_signal}",
           "",
-          "Gate/Nasdaq 上下文：",
+          "Gate 上下文：",
           "{gate_context}",
           "",
           "可用工具目录：",

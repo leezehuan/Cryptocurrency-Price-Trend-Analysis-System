@@ -50,7 +50,6 @@ class AgentAnalysisState(BaseGraphState):
     analysis_event: NotRequired[str]
     result: NotRequired[dict[str, Any]]
     gate_context: NotRequired[dict[str, Any]]
-    nasdaq_context: NotRequired[list[dict[str, Any]]]
     react_tools_used: NotRequired[list[str]]
     react_tool_results: NotRequired[dict[str, Any]]
     evidence_conflict: NotRequired[dict[str, Any]]

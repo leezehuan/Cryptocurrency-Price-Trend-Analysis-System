@@ -1389,20 +1389,11 @@ def build_agent_analysis_signal(conn: sqlite3.Connection) -> dict[str, Any]:
         from .gate_mcp import latest_btc_contract_metrics, latest_sentiment_snapshot
         gate_signal["btc_contract"] = latest_btc_contract_metrics(conn)
         gate_signal["sentiment"] = latest_sentiment_snapshot(conn)
-        nasdaq_rows = conn.execute(
-            "SELECT * FROM nasdaq_market_data ORDER BY fetched_at DESC LIMIT 8"
-        ).fetchall()
-        gate_signal["nasdaq"] = rows_to_dicts(nasdaq_rows)
         sentiment = gate_signal.get("sentiment", {})
         if sentiment.get("overall_sentiment") in ("extreme_fear", "fear"):
             risk_notes.append("Gate 情绪偏恐慌，注意短期下行风险")
         elif sentiment.get("overall_sentiment") in ("extreme_greed", "greed"):
             risk_notes.append("Gate 情绪偏贪婪，注意回调风险")
-        nasdaq_context = gate_signal.get("nasdaq", [])
-        if nasdaq_context:
-            first_change = nasdaq_context[0].get("change_pct")
-            if first_change is not None and float(first_change) <= -1:
-                risk_notes.append("纳指相关市场走弱，风险偏好可能承压")
     except Exception:
         pass
     return {
@@ -1922,11 +1913,6 @@ def run_scheduled_gate_info_sync(conn: sqlite3.Connection) -> dict[str, Any]:
     return sync_gate_info(conn)
 
 
-def run_scheduled_nasdaq_sync(conn: sqlite3.Connection) -> dict[str, Any]:
-    from .gate_mcp import sync_nasdaq_data
-    return sync_nasdaq_data(conn)
-
-
 def run_scheduled_task(conn: sqlite3.Connection, task_name: str) -> dict[str, Any]:
     run_id = record_scheduled_task_start(conn, task_name)
     try:
@@ -1950,8 +1936,6 @@ def run_scheduled_task(conn: sqlite3.Connection, task_name: str) -> dict[str, An
             result = run_scheduled_gate_square_user_sync(conn)
         elif task_name == "gate_info_sync":
             result = run_scheduled_gate_info_sync(conn)
-        elif task_name == "nasdaq_index_sync":
-            result = run_scheduled_nasdaq_sync(conn)
         else:
             raise ValueError(f"unknown scheduled task: {task_name}")
     except Exception as exc:

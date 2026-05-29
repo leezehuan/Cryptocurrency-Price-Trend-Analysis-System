@@ -34,7 +34,6 @@ GET_ENDPOINTS = [
     "/api/sources/gate/status",
     "/api/sources/gate/accounts",
     "/api/market/btc-contract",
-    "/api/market/nasdaq",
     "/api/square/hot",
     "/api/square/user-opinions",
     "/api/sentiment/market",
@@ -46,7 +45,6 @@ POST_ENDPOINTS = [
 ]
 
 REQUIRED_ROUTES = [
-    "/api/market/nasdaq",
     "/api/sources/gate/status",
     "/api/sources/gate/accounts",
     "/api/agent/runs/{run_id}/evidence",
@@ -132,7 +130,7 @@ def validate_agent_and_reports(client: TestClient) -> None:
     report = client.post("/api/reports/daily")
     assert_ok("/api/reports/daily", report.status_code)
     report_data = (report.json().get("data") or {})
-    assert_true("daily report nasdaq field", "nasdaq_status" in report_data)
+    assert_true("daily report contract field", "contract_status" in report_data)
 
 
 def validate_http_endpoints(client: TestClient) -> None:
