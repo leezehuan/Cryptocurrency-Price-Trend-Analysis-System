@@ -137,7 +137,10 @@ class PostgresConnection:
     def execute(self, query: str, params: Any = ()) -> PostgresCursor:
         converted = convert_sql_for_postgres(query, returning_id=True)
         cursor = self.conn.cursor()
-        cursor.execute(converted, params or ())
+        if params:
+            cursor.execute(converted, params)
+        else:
+            cursor.execute(converted)
         lastrowid = None
         if "RETURNING ID" in converted.upper():
             row = cursor.fetchone()
@@ -290,6 +293,14 @@ def seed_default_settings(conn: sqlite3.Connection) -> None:
                 "UPDATE settings SET value = ?, updated_at = ? WHERE key = 'market.intervals'",
                 (setting_value_to_text(DEFAULT_SETTINGS["market.intervals"][0], "json"), utc_now()),
             )
+    # 自动清理不在 DEFAULT_SETTINGS 中的旧设置项
+    valid_keys = set(DEFAULT_SETTINGS.keys())
+    stale = conn.execute("SELECT key FROM settings").fetchall()
+    for row in stale:
+        key = str(row["key"])
+        if key not in valid_keys:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+    conn.commit()
 
 
 def migrate_market_data_unique_constraint(conn: sqlite3.Connection) -> None:

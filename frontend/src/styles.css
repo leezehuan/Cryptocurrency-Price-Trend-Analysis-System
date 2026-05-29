@@ -442,7 +442,7 @@ button:disabled {
 
 .stream-list {
   display: grid;
-  max-height: 260px;
+  max-height: 420px;
   margin-top: 12px;
   gap: 10px;
   overflow: auto;
@@ -454,6 +454,20 @@ button:disabled {
   border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 14px;
   background: rgba(15, 23, 42, 0.72);
+  transition: border-color 0.2s ease;
+}
+
+.stream-item.clickable {
+  cursor: pointer;
+}
+
+.stream-item.clickable:hover {
+  border-color: rgba(125, 211, 252, 0.42);
+}
+
+.stream-item.expanded {
+  border-color: rgba(125, 211, 252, 0.38);
+  background: rgba(15, 23, 42, 0.88);
 }
 
 .stream-item.failed {
@@ -470,6 +484,21 @@ button:disabled {
   margin: 6px 0 0;
   color: #dbeafe;
   font-size: 13px;
+}
+
+.stream-detail {
+  margin: 10px 0 0;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.78);
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow-y: auto;
 }
 
 .metrics-grid {

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, Bot, BrainCircuit, CheckCircle2, Clock3, Database, Flame, LineChart, RefreshCw, Send, ShieldAlert, TrendingDown, TrendingUp } from 'lucide-react';
 
 // 后端市场摘要接口返回的数据结构，用于顶部行情卡片和走势图。
@@ -300,6 +300,15 @@ type NasdaqRow = {
 
 type GateSourceStatus = Record<string, { count?: number; latest?: string | null } | Record<string, unknown>>;
 
+type GateSyncTaskResult = {
+  status?: string;
+  error?: string;
+  error_message?: string | null;
+  data?: Record<string, unknown>;
+  task_name?: string;
+  [key: string]: unknown;
+};
+
 type SourceAccount = {
   id?: number;
   analyst_id?: number | null;
@@ -527,6 +536,45 @@ function settingValueText(value: unknown): string {
   return String(value);
 }
 
+function gateTaskText(task: string): string {
+  return {
+    gate_btc_contract_sync: 'BTC 合约',
+    gate_news_sync: 'Gate 资讯',
+    gate_square_hot_sync: 'Square 热门',
+    gate_square_user_sync: 'Square 关注',
+    gate_info_sync: 'Gate Info',
+    market_sentiment_build: '市场情绪',
+    market_memory_compact: '市场记忆',
+    nasdaq_index_sync: 'Nasdaq'
+  }[task] || task;
+}
+
+function gateSyncResultText(task: string, value: unknown): string {
+  const result = value && typeof value === 'object' ? value as GateSyncTaskResult : {};
+  const data = result.data && typeof result.data === 'object' ? result.data : result;
+  const error = result.error_message || result.error || data.error;
+  const label = gateTaskText(task);
+  if (error || result.status === 'failed') return `${label}失败：${String(error || '未知错误')}`;
+  if (data.synced === false) {
+    const reason = String(data.reason || data.error || '无可用数据');
+    if (reason === 'no followed users configured') return `${label}已跳过：未配置关注用户`;
+    return `${label}未同步：${reason}`;
+  }
+  if (task === 'gate_square_hot_sync') {
+    const count = typeof data.count === 'number' ? data.count : Number(data.count || 0);
+    const tool = data.tool ? `，工具 ${String(data.tool)}` : '';
+    const translated = data.translated_count != null ? Number(data.translated_count) : 0;
+    const translateNote = translated > 0 ? `，其中 ${translated} 条为英文翻译` : '';
+    return count > 0 ? `${label}新增/更新 ${count} 条热门贴${tool}${translateNote}` : `${label}同步成功，但没有拿到热门贴${tool}`;
+  }
+  if (typeof data.count === 'number' || data.count != null) return `${label}完成：${String(data.count)} 条`;
+  return `${label}完成`;
+}
+
+function gateSyncSummary(results: Record<string, unknown>): string {
+  return Object.entries(results).map(([task, result]) => gateSyncResultText(task, result)).join('；');
+}
+
 function streamEventTitle(event: AgentStreamEvent): string {
   if (event.type === 'local') return '界面操作';
   if (event.type === 'error') return '连接异常';
@@ -646,6 +694,8 @@ export function App() {
   const [streamEvents, setStreamEvents] = useState<AgentStreamEvent[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
   const [debugPanelCollapsed, setDebugPanelCollapsed] = useState(true);
+  const [expandedEventId, setExpandedEventId] = useState<number | null>(null);
+  const streamListRef = useRef<HTMLDivElement>(null);
   const [verifiedPredictionsExpanded, setVerifiedPredictionsExpanded] = useState(false);
   const [btcContract, setBtcContract] = useState<BtcContract | null>(null);
   const [sentiment, setSentiment] = useState<SentimentSnapshot | null>(null);
@@ -773,6 +823,13 @@ export function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  // 新事件到达时自动滚动到调试列表底部
+  useEffect(() => {
+    if (streamListRef.current && !debugPanelCollapsed) {
+      streamListRef.current.scrollTop = streamListRef.current.scrollHeight;
+    }
+  }, [streamEvents, debugPanelCollapsed]);
+
   useEffect(() => {
     // 通过 SSE 订阅 Agent 节点输出和心跳事件。
     const source = new EventSource(`${API_BASE}/api/agent/stream`);
@@ -780,7 +837,11 @@ export function App() {
       setStreamConnected(true);
     });
     source.addEventListener('agent_output', (event) => {
-      appendStreamEvent(JSON.parse((event as MessageEvent).data) as AgentStreamEvent);
+      const payload = JSON.parse((event as MessageEvent).data) as AgentStreamEvent;
+      appendStreamEvent(payload);
+      if (payload.node_name) {
+        setDebugPanelCollapsed(false);
+      }
     });
     source.addEventListener('heartbeat', (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as AgentStreamEvent;
@@ -1056,14 +1117,26 @@ export function App() {
   const runGateSync = async (tasks: string[]) => {
     setLoading(true);
     try {
-      await requestJson<Record<string, unknown>>('/api/sources/gate/sync', {
+      const result = await requestJson<Record<string, unknown>>('/api/sources/gate/sync', {
         method: 'POST',
         body: JSON.stringify({ tasks })
       });
-      setMessage(`Gate 数据同步完成：${tasks.join('、')}`);
+      const summary = gateSyncSummary(result);
+      appendStreamEvent({
+        id: Date.now(),
+        type: 'local',
+        message: `Gate 同步结果：${summary}`,
+        created_at: new Date().toISOString(),
+        output: result
+      });
+      setDebugPanelCollapsed(false);
       await loadAll();
+      setMessage(`Gate 数据同步完成：${summary}`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Gate 数据同步失败');
+      const message = error instanceof Error ? error.message : 'Gate 数据同步失败';
+      appendStreamEvent({ id: Date.now(), type: 'error', message, created_at: new Date().toISOString() });
+      setDebugPanelCollapsed(false);
+      setMessage(message);
     } finally {
       setLoading(false);
     }
@@ -1253,16 +1326,27 @@ export function App() {
                 <button className="ghost-button tiny" type="button" onClick={() => setDebugPanelCollapsed(true)}>收起</button>
               </div>
             </div>
-            <div className="stream-list">
-              {streamEvents.slice(0, 12).map((event) => (
-                <article className={`stream-item ${event.status === 'failed' || event.type === 'error' ? 'failed' : ''}`} key={`${event.type || 'event'}-${event.id}-${event.created_at || ''}`}>
-                  <div className="stream-meta">
-                    <span>{streamEventTitle(event)}</span>
-                    <em>{formatDate(event.created_at || undefined)}</em>
-                  </div>
-                  <p>{event.message}</p>
-                </article>
-              ))}
+            <div className="stream-list" ref={streamListRef}>
+              {streamEvents.map((event) => {
+                const isExpanded = expandedEventId === event.id;
+                const hasOutput = event.output && Object.keys(event.output).length > 0;
+                return (
+                  <article
+                    className={`stream-item ${event.status === 'failed' || event.type === 'error' ? 'failed' : ''} ${isExpanded ? 'expanded' : ''} ${hasOutput ? 'clickable' : ''}`}
+                    key={`${event.type || 'event'}-${event.id}-${event.created_at || ''}`}
+                    onClick={() => hasOutput && setExpandedEventId(isExpanded ? null : event.id)}
+                  >
+                    <div className="stream-meta">
+                      <span>{streamEventTitle(event)} {event.status && event.status !== 'success' ? `· ${event.status}` : ''}</span>
+                      <em>{formatDate(event.created_at || undefined)}</em>
+                    </div>
+                    <p>{event.message}</p>
+                    {isExpanded && hasOutput && (
+                      <pre className="stream-detail">{JSON.stringify(event.output, null, 2)}</pre>
+                    )}
+                  </article>
+                );
+              })}
               {!streamEvents.length && <div className="empty">等待 AI 节点输出、报告生成或观点解析。</div>}
             </div>
           </div>

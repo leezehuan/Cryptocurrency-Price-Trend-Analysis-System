@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,6 +42,7 @@ from .services import (
     market_series,
     market_summary,
     reject_human_review,
+    cleanup_stale_settings,
     reset_default_settings,
     resolve_human_review,
     run_agent,
@@ -60,8 +62,22 @@ from .gate_mcp import (
     recent_square_posts,
 )
 
+_shutdown_event: asyncio.Event | None = None
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
+    init_db()
+    start_scheduler()
+    yield
+    _shutdown_event.set()
+    stop_scheduler()
+
+
 # 创建 FastAPI 应用实例，统一承载行情、预测、Agent 和报告接口。
-app = FastAPI(title="BTC Agent Decision API", version="0.1.0")
+app = FastAPI(title="BTC Agent Decision API", version="0.1.0", lifespan=lifespan)
 
 # 允许本地前端开发服务器访问后端 API。
 app.add_middleware(
@@ -81,19 +97,6 @@ async def strip_bit_prefix(request: Request, call_next):
     elif request.scope["path"].startswith("/bit/"):
         request.scope["path"] = request.scope["path"][len("/bit") :]
     return await call_next(request)
-
-
-@app.on_event("startup")
-def startup() -> None:
-    # 服务启动时初始化数据库，并按配置启动后台调度器。
-    init_db()
-    start_scheduler()
-
-
-@app.on_event("shutdown")
-def shutdown() -> None:
-    # 服务停止时关闭调度器，避免后台线程残留。
-    stop_scheduler()
 
 
 def get_db() -> Generator[sqlite3.Connection, None, None]:
@@ -218,6 +221,12 @@ def post_reset_default_settings(db: sqlite3.Connection = Depends(get_db)) -> dic
     return reset_default_settings(db)
 
 
+@app.post("/api/settings/cleanup")
+def post_cleanup_settings(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    """清理数据库中不在当前 DEFAULT_SETTINGS 定义中的旧设置项。"""
+    return cleanup_stale_settings(db)
+
+
 @app.post("/api/config/model/test")
 def post_test_model_connection() -> dict[str, object]:
     # 使用配置的模型服务执行一次最小化调用，验证模型连接。
@@ -340,6 +349,8 @@ async def get_agent_stream(after_id: int = Query(default=0, ge=0)) -> StreamingR
         # 使用 SSE 持续推送 Agent 节点输出；无新事件时发送心跳。
         last_id = after_id
         while True:
+            if _shutdown_event is not None and _shutdown_event.is_set():
+                break
             try:
                 with connect() as conn:
                     events = list_agent_stream_events(conn, last_id, 50)
@@ -349,13 +360,19 @@ async def get_agent_stream(after_id: int = Query(default=0, ge=0)) -> StreamingR
                 if not events:
                     heartbeat = {"id": last_id, "message": "等待 AI 输出", "type": "heartbeat"}
                     yield f"event: heartbeat\ndata: {json.dumps(heartbeat, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(1.2)
+                try:
+                    await asyncio.wait_for(_shutdown_event.wait(), timeout=1.2)
+                except asyncio.TimeoutError:
+                    pass
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 payload = {"id": last_id, "message": str(exc), "type": "error"}
                 yield f"event: stream_error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(2)
+                try:
+                    await asyncio.wait_for(_shutdown_event.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -16,9 +17,11 @@ from typing import Any
 import httpx
 
 from .database import utc_now
+from .gate_rest_client import GateRestClient
 
 logger = logging.getLogger(__name__)
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+SQUARE_SEARCH_QUERY = "BTC 比特币"
 
 # MCP 端点路径映射
 MCP_ENDPOINTS = {
@@ -143,6 +146,15 @@ def record_mcp_call(
     latency_ms: int,
 ) -> int:
     """将一次 MCP 调用记录写入 gate_mcp_raw_records。"""
+    raw_text = json.dumps(response_payload, ensure_ascii=False, default=str)
+    # 超长响应只保留前半段，避免数据库/日志爆炸，同时尽量保留 JSON 结构完整性。
+    if len(raw_text) > 128000:
+        truncated = raw_text[:128000]
+        # 尝试截断到最近的 JSON 对象边界，保证可解析
+        last_brace = truncated.rfind("}")
+        if last_brace > 0:
+            truncated = truncated[: last_brace + 1] + ']}]}'
+        raw_text = truncated
     cursor = conn.execute(
         """
         INSERT INTO gate_mcp_raw_records (
@@ -154,7 +166,7 @@ def record_mcp_call(
             endpoint,
             tool_name,
             json.dumps(request_payload, ensure_ascii=False),
-            json.dumps(response_payload, ensure_ascii=False, default=str)[:32000],
+            raw_text,
             status,
             error_message,
             latency_ms,
@@ -204,38 +216,338 @@ def extract_text_content(result: dict[str, Any]) -> str:
 
 def parse_json_from_content(result: dict[str, Any]) -> Any:
     """尝试从 MCP 工具返回的文本中解析 JSON。"""
-    text = extract_text_content(result)
+    structured = result.get("structuredContent")
+    if structured not in (None, {}, []):
+        return structured
+    content = result.get("content", [])
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            for key in ("json", "data", "structuredContent"):
+                value = item.get(key)
+                if value not in (None, "", {}, []):
+                    return value
+    text = extract_text_content(result).strip()
     if not text:
         return None
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
     try:
         return json.loads(text)
     except (json.JSONDecodeError, TypeError):
-        return text
+        pass
+    for start_token, end_token in (("[", "]"), ("{", "}")):
+        start = text.find(start_token)
+        end = text.rfind(end_token)
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except (json.JSONDecodeError, TypeError):
+                continue
+    return text
+
+
+def _first_value(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _nested_value(mapping: dict[str, Any], keys: tuple[str, ...], nested_keys: tuple[str, ...]) -> Any:
+    value = _first_value(mapping, keys)
+    if isinstance(value, dict):
+        return _first_value(value, nested_keys)
+    return value
+
+
+def _coerce_time(value: Any, fallback: str) -> str:
+    if value in (None, ""):
+        return fallback
+    if isinstance(value, (int, float)) or str(value).isdigit():
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(microsecond=0).isoformat()
+    return str(value)
+
+
+def _contains_chinese(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _square_hot_rank(post: dict[str, Any]) -> float:
+    return (
+        float(post.get("hot_score") or 0)
+        + float(post.get("likes") or 0) * 0.2
+        + float(post.get("comments") or 0) * 0.5
+        + float(post.get("repost_count") or 0) * 0.8
+    )
+
+
+def _square_preview(posts: list[dict[str, Any]], limit: int = 3) -> list[str]:
+    return [str(post.get("content") or "").replace("\n", " ")[:160] for post in posts[:limit]]
+
+
+def _translate_posts_to_chinese(posts: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """将英文帖子翻译为中文，返回 (翻译后帖子列表, 翻译条数)。
+
+    已含中文的帖子不做翻译；翻译失败时保留原文。
+    """
+    if not posts:
+        return posts, 0
+    need_translate = [p for p in posts if not _contains_chinese(str(p.get("content") or ""))]
+    if not need_translate:
+        return posts, 0
+    try:
+        from .llm_client import active_provider_config
+        provider = active_provider_config()
+        base_url = str(provider.get("base_url") or "").rstrip("/")
+        api_key = str(provider.get("api_key") or "")
+        model = str(provider.get("chat_model") or "")
+        if not base_url or not model:
+            logger.warning("Square translate skipped: LLM not configured")
+            return posts, 0
+    except Exception as exc:
+        logger.warning("Square translate skipped: %s", exc)
+        return posts, 0
+    translated_count = 0
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}" if api_key else "",
+    }
+    timeout_sec = int(provider.get("timeout_seconds", 30))
+    max_tokens = min(int(provider.get("max_tokens", 1200)), 2000)
+    for post in need_translate:
+        original = str(post.get("content") or "")
+        if not original.strip():
+            continue
+        try:
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "你是一个翻译助手。将以下英文加密货币/区块链相关帖子翻译成自然流畅的中文。只输出翻译结果，不要添加解释或额外内容。如果内容已经是中文则原样返回。"},
+                    {"role": "user", "content": original[:3000]},
+                ],
+                "temperature": 0.3,
+                "max_tokens": max_tokens,
+            }
+            with httpx.Client(timeout=timeout_sec) as llm_client:
+                resp = llm_client.post(f"{base_url}/chat/completions", json=body, headers=headers)
+                resp.raise_for_status()
+            result = resp.json()
+            translated = result["choices"][0]["message"]["content"].strip()
+            if translated and len(translated) > len(original) * 0.3:
+                post["content"] = translated[:4000]
+                post["source"] = post.get("source", "gate_square") + "_translated"
+                translated_count += 1
+        except Exception as exc:
+            logger.debug("Square post translate failed: %s", exc)
+            continue
+    return posts, translated_count
+
+
+def _extract_square_items(data: Any, depth: int = 0) -> list[Any]:
+    if depth > 4:
+        return []
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("posts", "items", "data", "list", "result", "records", "rows"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            nested = _extract_square_items(value, depth + 1)
+            if nested:
+                return nested
+    for value in data.values():
+        if isinstance(value, (dict, list)):
+            nested = _extract_square_items(value, depth + 1)
+            if nested:
+                return nested
+    return []
+
+
+def _square_text_post(text: str, now: str) -> dict[str, Any] | None:
+    content = text.strip()
+    if not content:
+        return None
+    digest = hashlib.sha1(content[:4000].encode("utf-8")).hexdigest()[:16]
+    return {
+        "post_id": f"square_ai_search:{digest}",
+        "author": "Gate Square AI Search",
+        "author_id": "",
+        "content": content[:4000],
+        "publish_time": now,
+        "likes": 0,
+        "comments": 0,
+        "repost_count": 0,
+        "tags": [],
+        "hot_score": 0,
+        "source": "gate_square_ai_search",
+    }
+
+
+def _normalize_square_post(post: dict[str, Any], now: str) -> dict[str, Any] | None:
+    content_value = _first_value(post, ("content", "text", "body", "summary", "description", "title"))
+    if content_value in (None, ""):
+        content_value = json.dumps(post, ensure_ascii=False, default=str)
+    content = str(content_value).strip()
+    if not content:
+        return None
+    post_id = str(_first_value(post, ("id", "post_id", "feed_id", "topic_id", "article_id", "url")) or "")
+    if not post_id:
+        digest = hashlib.sha1(content[:4000].encode("utf-8")).hexdigest()[:16]
+        post_id = f"square_post:{digest}"
+    tags = _first_value(post, ("tags", "labels", "topics")) or []
+    if isinstance(tags, str):
+        try:
+            tags = json.loads(tags)
+        except (json.JSONDecodeError, TypeError):
+            tags = [tags]
+    author = _nested_value(post, ("author", "user", "user_info", "author_info"), ("name", "nickname", "user_name", "display_name"))
+    author_id = _nested_value(post, ("author_id", "user_id", "uid", "user", "user_info", "author_info"), ("id", "user_id", "uid"))
+    return {
+        "post_id": post_id,
+        "author": str(author or "Gate Square"),
+        "author_id": str(author_id or ""),
+        "content": content[:4000],
+        "publish_time": _coerce_time(_first_value(post, ("publish_time", "created_at", "create_time", "time", "timestamp")), now),
+        "likes": _int(_first_value(post, ("likes", "like_count", "likes_count"))),
+        "comments": _int(_first_value(post, ("comments", "comment_count", "comments_count"))),
+        "repost_count": _int(_first_value(post, ("reposts", "repost_count", "share_count"))),
+        "tags": tags if isinstance(tags, list) else [],
+        "hot_score": _float(_first_value(post, ("hot_score", "score", "weight"))) or 0,
+        "source": "gate_square",
+    }
+
+
+def _normalize_square_posts(data: Any, now: str) -> list[dict[str, Any]]:
+    if isinstance(data, str):
+        text_post = _square_text_post(data, now)
+        return [text_post] if text_post else []
+    items = _extract_square_items(data)
+    posts: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            normalized = _normalize_square_post(item, now)
+        elif isinstance(item, str):
+            normalized = _square_text_post(item, now)
+        else:
+            normalized = None
+        if normalized:
+            posts.append(normalized)
+    return posts
+
+
+def _square_tool_names(client: GateMCPClient, endpoint: str) -> set[str]:
+    try:
+        return {str(tool.get("name")) for tool in client.list_tools(endpoint) if isinstance(tool, dict) and tool.get("name")}
+    except Exception:
+        return set()
+
+
+def _square_tool_schema(client: GateMCPClient, endpoint: str, tool_name: str) -> dict[str, Any]:
+    try:
+        for tool in client.list_tools(endpoint):
+            if isinstance(tool, dict) and tool.get("name") == tool_name:
+                schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+                return schema if isinstance(schema, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+
+def _square_search_arguments(client: GateMCPClient, endpoint: str, tool_name: str, limit: int) -> dict[str, Any]:
+    schema = _square_tool_schema(client, endpoint, tool_name)
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    if not properties:
+        return {"keyword": SQUARE_SEARCH_QUERY, "limit": limit}
+    args: dict[str, Any] = {}
+    for name in ("limit", "page_size", "size", "per_page"):
+        if name in properties:
+            args[name] = limit
+            break
+    for name in ("keyword", "query", "q", "search", "text", "content", "prompt"):
+        if name in properties:
+            args[name] = SQUARE_SEARCH_QUERY
+            break
+    for name in ("language", "lang", "locale"):
+        if name in properties:
+            args[name] = "zh-CN"
+            break
+    for name in ("sort", "sort_by", "order_by", "order"):
+        if name in properties:
+            args[name] = "hot"
+            break
+    for name in required:
+        if name in args:
+            continue
+        prop = properties.get(name) if isinstance(properties.get(name), dict) else {}
+        value_type = prop.get("type")
+        if value_type in ("integer", "number"):
+            args[name] = limit
+        elif value_type == "boolean":
+            args[name] = False
+        else:
+            args[name] = SQUARE_SEARCH_QUERY
+    return args
+
+
+def _square_hot_tool_candidates(client: GateMCPClient, limit: int) -> list[tuple[str, str, dict[str, Any]]]:
+    mcp_names = _square_tool_names(client, "mcp")
+    candidates: list[tuple[str, str, dict[str, Any]]] = []
+    tool_names = ("cex_square_list_square_ai_search", "list_square_ai_search", "square_ai_search")
+    for tool_name in tool_names:
+        if mcp_names and tool_name not in mcp_names:
+            continue
+        candidates.append(("mcp", tool_name, _square_search_arguments(client, "mcp", tool_name, limit)))
+        for key in ("keyword", "query", "content", "q"):
+            args = {key: SQUARE_SEARCH_QUERY, "limit": limit}
+            if args not in [item[2] for item in candidates if item[1] == tool_name]:
+                candidates.append(("mcp", tool_name, args))
+    candidates.append(("mcp/info", "get_square_hot", {"limit": limit}))
+    return candidates
 
 
 # ---------------------------------------------------------------------------
 # BTC 合约数据同步
 # ---------------------------------------------------------------------------
 
-def sync_btc_contract_metrics(conn: sqlite3.Connection, client: GateMCPClient | None = None) -> dict[str, Any]:
-    """从 Gate MCP 获取 BTC 合约行情并写入 btc_contract_metrics。"""
-    if client is None:
-        client = _default_client(conn)
+def _btc_contract_tool_candidates(client: GateMCPClient) -> list[tuple[str, str, dict[str, Any]]]:
+    """发现可用于获取 BTC 合约行情的 MCP 工具候选列表。"""
+    hardcoded = ("get_futures_tickers", "get_perpetual_tickers", "get_contract_tickers",
+                 "get_futures_contracts", "get_tickers", "futures_ticker")
+    mcp_names = _square_tool_names(client, "mcp")
+    candidates: list[tuple[str, str, dict[str, Any]]] = []
+    for name in hardcoded:
+        if mcp_names and name not in mcp_names:
+            continue
+        candidates.append(("mcp", name, {"settle": "usdt", "contract": "BTC_USDT"}))
+    # 动态发现：名字包含 futures/ticker/contract/perpetual 的工具
+    if mcp_names:
+        for name in mcp_names:
+            if any(k in name.lower() for k in ("futures", "ticker", "contract", "perpetual")):
+                args = {"settle": "usdt", "contract": "BTC_USDT"}
+                if ("mcp", name, args) not in candidates:
+                    candidates.append(("mcp", name, args))
+    return candidates
 
-    result = safe_call_tool(client, conn, "mcp", "get_futures_tickers", {
-        "settle": "usdt",
-        "contract": "BTC_USDT",
-    })
-    data = parse_json_from_content(result)
 
-    # Gate futures tickers 返回数组
-    ticker = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
-    if not ticker:
-        return {"synced": False, "error": "empty ticker response"}
-
+def _write_btc_contract_metrics(conn: sqlite3.Connection, ticker: dict[str, Any], source: str) -> None:
+    """将 ticker 字典写入 btc_contract_metrics。"""
     now = utc_now()
     fetched_at = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
-
     conn.execute(
         """
         INSERT INTO btc_contract_metrics (
@@ -258,18 +570,65 @@ def sync_btc_contract_metrics(conn: sqlite3.Connection, client: GateMCPClient | 
             _float(ticker.get("index_price")),
             _float(ticker.get("funding_rate")),
             _float(ticker.get("funding_rate_indicative")),
-            _float(ticker.get("volume_24h") or ticker.get("volume_24h_quote")),
+            _float(ticker.get("volume_24h") or ticker.get("volume_24h_settle") or ticker.get("volume_24h_quote")),
             _float(ticker.get("quanto_base_rate") or ticker.get("open_interest")),
             _float(ticker.get("high_24h")),
             _float(ticker.get("low_24h")),
             _float(ticker.get("change_percentage")),
-            "gate_mcp",
+            source,
             fetched_at,
             now,
         ),
     )
     conn.commit()
 
+
+def sync_btc_contract_metrics(conn: sqlite3.Connection, client: GateMCPClient | None = None) -> dict[str, Any]:
+    """从 Gate REST API 获取 BTC 合约行情并写入 btc_contract_metrics；失败时回退到 MCP。"""
+    # 优先尝试 REST API
+    try:
+        rest = GateRestClient()
+        tickers = rest.list_futures_tickers(settle="usdt", contract="BTC_USDT")
+        if isinstance(tickers, list) and tickers:
+            ticker = tickers[0]
+            if isinstance(ticker, dict) and ticker.get("contract"):
+                _write_btc_contract_metrics(conn, ticker, "gate_rest")
+                logger.info("BTC contract synced via REST API")
+                return _btc_metrics_and_chained(conn, client, ticker, "gate_rest")
+    except Exception as exc:
+        logger.warning("BTC contract REST API failed, fallback to MCP: %s", exc)
+
+    # 回退到 MCP
+    if client is None:
+        client = _default_client(conn)
+    errors: list[str] = []
+    result: dict[str, Any] | None = None
+    used_tool = ""
+    for endpoint, tool_name, arguments in _btc_contract_tool_candidates(client):
+        try:
+            result = safe_call_tool(client, conn, endpoint, tool_name, arguments)
+            used_tool = tool_name
+            break
+        except Exception as exc:
+            errors.append(f"{endpoint}/{tool_name}: {exc}")
+            continue
+    if result is None:
+        error_message = "; ".join(errors) if errors else "no btc contract tool candidate available"
+        logger.warning("BTC contract sync failed: %s", error_message)
+        return {"synced": False, "error": error_message}
+
+    data = parse_json_from_content(result)
+    ticker = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
+    if not ticker:
+        return {"synced": False, "error": "empty ticker response", "tool": used_tool}
+
+    _write_btc_contract_metrics(conn, ticker, "gate_mcp")
+    return _btc_metrics_and_chained(conn, client, ticker, "gate_mcp")
+
+
+def _btc_metrics_and_chained(conn: sqlite3.Connection, client: GateMCPClient | None, ticker: dict[str, Any], source: str) -> dict[str, Any]:
+    now = utc_now()
+    fetched_at = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
     # A2: 串联 K 线和资金费率历史同步（失败不影响 ticker 结果）
     kline_result: dict[str, Any] = {}
     funding_result: dict[str, Any] = {}
@@ -293,6 +652,7 @@ def sync_btc_contract_metrics(conn: sqlite3.Connection, client: GateMCPClient | 
         "last_price": _float(ticker.get("last")),
         "funding_rate": _float(ticker.get("funding_rate")),
         "fetched_at": fetched_at,
+        "source": source,
         "klines": kline_result,
         "funding_history": funding_result,
         "context": context_result,
@@ -344,14 +704,34 @@ def sync_nasdaq_data(conn: sqlite3.Connection) -> dict[str, Any]:
     yahoo_symbols = ",".join(symbol_map.get(item, item) for item in requested)
     if not yahoo_symbols:
         return {"synced": False, "reason": "no nasdaq symbols configured"}
-    try:
-        with httpx.Client(timeout=20) as client:
-            response = client.get(YAHOO_QUOTE_URL, params={"symbols": yahoo_symbols})
-            response.raise_for_status()
-            payload = response.json()
-    except Exception as exc:
-        logger.warning("Nasdaq data sync failed: %s", exc)
-        return {"synced": False, "error": str(exc)}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    payload: dict[str, Any] = {}
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            with httpx.Client(timeout=20) as client:
+                response = client.get(YAHOO_QUOTE_URL, params={"symbols": yahoo_symbols}, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+                break
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                wait = 2 ** attempt + 1
+                logger.warning("Nasdaq data sync got 429, retrying in %ds (attempt %d/3)", wait, attempt + 1)
+                time.sleep(wait)
+                last_exc = exc
+                continue
+            logger.warning("Nasdaq data sync failed: %s", exc)
+            return {"synced": False, "error": str(exc)}
+        except Exception as exc:
+            logger.warning("Nasdaq data sync failed: %s", exc)
+            return {"synced": False, "error": str(exc)}
+    else:
+        if last_exc:
+            return {"synced": False, "error": str(last_exc)}
+        return {"synced": False, "error": "unknown error after retries"}
 
     rows = ((payload.get("quoteResponse") or {}).get("result") or [])
     now = utc_now()
@@ -413,28 +793,56 @@ def sync_gate_square_hot(conn: sqlite3.Connection, client: GateMCPClient | None 
     if client is None:
         client = _default_client(conn)
 
-    try:
-        result = safe_call_tool(client, conn, "mcp/info", "get_square_hot", {
-            "limit": 20,
-        })
-    except Exception as exc:
-        logger.warning("Gate Square sync failed: %s", exc)
-        return {"synced": False, "error": str(exc)}
+    limit = 20
+    errors: list[str] = []
+    result: dict[str, Any] | None = None
+    used_endpoint = ""
+    used_tool = ""
+    candidate_results: list[dict[str, Any]] = []
+    for endpoint, tool_name, arguments in _square_hot_tool_candidates(client, limit):
+        try:
+            result = safe_call_tool(client, conn, endpoint, tool_name, arguments)
+            used_endpoint = endpoint
+            used_tool = tool_name
+        except Exception as exc:
+            errors.append(f"{endpoint}/{tool_name}: {exc}")
+            continue
+        data = parse_json_from_content(result)
+        now = utc_now()
+        raw_posts = _normalize_square_posts(data, now)
+        if raw_posts:
+            candidate_results.append({
+                "endpoint": endpoint,
+                "tool": tool_name,
+                "raw_posts": raw_posts,
+                "result": result,
+            })
+            break
+        errors.append(f"{endpoint}/{tool_name}: empty result after normalization")
+    if not candidate_results:
+        error_message = "; ".join(errors) if errors else "no square tool candidate available"
+        logger.warning("Gate Square sync failed: %s", error_message)
+        return {"synced": False, "error": error_message}
 
-    data = parse_json_from_content(result)
-    posts = data if isinstance(data, list) else []
-    now = utc_now()
+    best = candidate_results[0]
+    used_endpoint = best["endpoint"]
+    used_tool = best["tool"]
+    raw_posts = best["raw_posts"]
+    posts = list(raw_posts)
+    posts.sort(key=_square_hot_rank, reverse=True)
+    posts = posts[:limit]
+    posts, translated_count = _translate_posts_to_chinese(posts)
+
+    # 清除旧的热门帖子数据，只保留本次同步的最新热度帖子
+    try:
+        conn.execute("DELETE FROM gate_square_posts WHERE is_hot_post = 1")
+        conn.commit()
+    except Exception:
+        pass
+
     synced = 0
 
     for post in posts:
-        if not isinstance(post, dict):
-            continue
-        post_id = str(post.get("id") or post.get("post_id") or "")
-        if not post_id:
-            continue
-        content = str(post.get("content") or post.get("text") or "")
-        if not content:
-            continue
         try:
             conn.execute(
                 """
@@ -445,6 +853,8 @@ def sync_gate_square_hot(conn: sqlite3.Connection, client: GateMCPClient | None 
                     hot_score, is_followed_user, is_hot_post
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
                 ON CONFLICT(post_id) DO UPDATE SET
+                    content = excluded.content,
+                    source = excluded.source,
                     likes = excluded.likes,
                     comments = excluded.comments,
                     repost_count = excluded.repost_count,
@@ -453,27 +863,36 @@ def sync_gate_square_hot(conn: sqlite3.Connection, client: GateMCPClient | None 
                     is_hot_post = 1
                 """,
                 (
-                    post_id,
-                    str(post.get("author") or post.get("user_name") or ""),
-                    str(post.get("author_id") or post.get("user_id") or ""),
-                    content[:4000],
-                    post.get("publish_time") or post.get("created_at"),
-                    int(post.get("likes") or post.get("like_count") or 0),
-                    int(post.get("comments") or post.get("comment_count") or 0),
-                    int(post.get("reposts") or post.get("repost_count") or 0),
+                    post["post_id"],
+                    post["author"],
+                    post["author_id"],
+                    post["content"],
+                    post["publish_time"],
+                    post["likes"],
+                    post["comments"],
+                    post["repost_count"],
                     None,
-                    json.dumps(post.get("tags") or [], ensure_ascii=False),
-                    "gate_square",
+                    json.dumps(post["tags"], ensure_ascii=False),
+                    post["source"],
                     now,
                     now,
-                    float(post.get("hot_score") or post.get("score") or 0),
+                    post["hot_score"],
                 ),
             )
             synced += 1
         except Exception:
             continue
     conn.commit()
-    return {"synced": True, "count": synced}
+    return {
+        "synced": True,
+        "count": synced,
+        "raw_candidate_count": len(raw_posts),
+        "translated_count": translated_count,
+        "source": used_endpoint,
+        "tool": used_tool,
+        "preview": _square_preview(posts or raw_posts),
+        "candidates_failed": errors,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -853,7 +1272,12 @@ def active_market_memories(conn: sqlite3.Connection, symbol: str = "BTCUSDT", li
 def recent_square_posts(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
     """返回最近的 Gate Square 帖子。"""
     rows = conn.execute(
-        "SELECT * FROM gate_square_posts ORDER BY publish_time DESC, created_at DESC LIMIT ?",
+        """
+        SELECT * FROM gate_square_posts
+        WHERE is_hot_post = 1
+        ORDER BY hot_score DESC, likes DESC, comments DESC, repost_count DESC, publish_time DESC, created_at DESC
+        LIMIT ?
+        """,
         (limit,),
     ).fetchall()
     return [{key: row[key] for key in row.keys()} for row in rows]
@@ -1004,10 +1428,7 @@ def sync_gate_square_user_opinions(conn: sqlite3.Connection, client: GateMCPClie
 # ---------------------------------------------------------------------------
 
 def sync_btc_contract_klines(conn: sqlite3.Connection, client: GateMCPClient | None = None) -> dict[str, Any]:
-    """从 Gate MCP 拉取 BTC 合约 K 线写入 market_data 表。"""
-    if client is None:
-        client = _default_client(conn)
-
+    """从 Gate REST API 拉取 BTC 合约 K 线写入 market_data 表。"""
     from .database import utc_now as _utc_now
     from .services import get_setting_value
 
@@ -1025,30 +1446,25 @@ def sync_btc_contract_klines(conn: sqlite3.Connection, client: GateMCPClient | N
     total = 0
     errors: dict[str, str] = {}
 
+    rest = GateRestClient()
     for interval in intervals:
         gate_interval = intervals_map[interval]
         try:
-            result = safe_call_tool(client, conn, "mcp", "get_futures_candlesticks", {
-                "settle": "usdt",
-                "contract": "BTC_USDT",
-                "interval": gate_interval,
-                "limit": 50,
-            })
+            klines = rest.list_futures_candlesticks(
+                settle="usdt", contract="BTC_USDT", interval=gate_interval, limit=50
+            )
         except Exception as exc:
-            logger.warning("BTC kline sync failed for %s: %s", interval, exc)
+            logger.warning("BTC kline REST API failed for %s: %s", interval, exc)
             errors[interval] = str(exc)
             continue
 
-        data = parse_json_from_content(result)
-        klines = data if isinstance(data, list) else []
-
         for kline in klines:
-            if not isinstance(kline, dict):
+            if not isinstance(kline, (list, tuple)) or len(kline) < 6:
                 continue
             try:
-                open_time = kline.get("t") or kline.get("time") or kline.get("timestamp")
-                if open_time and isinstance(open_time, (int, float)):
-                    open_time = datetime.fromtimestamp(float(open_time), tz=timezone.utc).isoformat()
+                # Gate REST K线格式: [time, volume, close, high, low, open]
+                ts = kline[0]
+                open_time = datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat() if ts else now
                 conn.execute(
                     """
                     INSERT INTO market_data (
@@ -1066,11 +1482,11 @@ def sync_btc_contract_klines(conn: sqlite3.Connection, client: GateMCPClient | N
                     (
                         "BTCUSDT", "perpetual", interval,
                         open_time,
-                        _float(kline.get("o") or kline.get("open")),
-                        _float(kline.get("h") or kline.get("high")),
-                        _float(kline.get("l") or kline.get("low")),
-                        _float(kline.get("c") or kline.get("close")),
-                        _float(kline.get("v") or kline.get("volume")),
+                        _float(kline[5]),   # open
+                        _float(kline[3]),   # high
+                        _float(kline[4]),   # low
+                        _float(kline[2]),   # close
+                        _float(kline[1]),   # volume
                         0.0,
                         now,
                     ),
@@ -1084,25 +1500,16 @@ def sync_btc_contract_klines(conn: sqlite3.Connection, client: GateMCPClient | N
 
 
 def sync_btc_funding_rate_history(conn: sqlite3.Connection, client: GateMCPClient | None = None) -> dict[str, Any]:
-    """从 Gate MCP 拉取 BTC 资金费率历史。"""
-    if client is None:
-        client = _default_client(conn)
-
+    """从 Gate REST API 拉取 BTC 资金费率历史。"""
     try:
-        result = safe_call_tool(client, conn, "mcp", "get_futures_funding_rate", {
-            "settle": "usdt",
-            "contract": "BTC_USDT",
-            "limit": 20,
-        })
+        rest = GateRestClient()
+        rates = rest.list_futures_funding_rate(settle="usdt", contract="BTC_USDT", limit=20)
     except Exception as exc:
-        logger.warning("BTC funding rate history sync failed: %s", exc)
+        logger.warning("BTC funding rate history REST API failed: %s", exc)
         return {"synced": False, "error": str(exc)}
 
-    data = parse_json_from_content(result)
-    rates = data if isinstance(data, list) else []
     now = utc_now()
     synced = 0
-
     for item in rates:
         if not isinstance(item, dict):
             continue
@@ -1119,7 +1526,7 @@ def sync_btc_funding_rate_history(conn: sqlite3.Connection, client: GateMCPClien
                 """
                 INSERT INTO btc_contract_metrics (
                     symbol, last_price, funding_rate, source, fetched_at, created_at
-                ) VALUES ('BTC_USDT', 0, ?, 'gate_mcp_funding', ?, ?)
+                ) VALUES ('BTC_USDT', 0, ?, 'gate_rest_funding', ?, ?)
                 ON CONFLICT(symbol, fetched_at) DO UPDATE SET
                     funding_rate = excluded.funding_rate
                 """,
@@ -1134,40 +1541,41 @@ def sync_btc_funding_rate_history(conn: sqlite3.Connection, client: GateMCPClien
 
 
 def sync_btc_contract_context(conn: sqlite3.Connection, client: GateMCPClient | None = None) -> dict[str, Any]:
-    if client is None:
-        client = _default_client(conn)
-    try:
-        tools = client.list_tools("mcp")
-    except Exception as exc:
-        logger.warning("BTC contract context tools/list failed: %s", exc)
-        return {"synced": False, "error": str(exc)}
-
-    keyword_groups = {
-        "depth": ("order_book", "depth"),
-        "trades": ("trade", "trades"),
-        "premium": ("premium",),
-        "liquidation": ("liquidation", "liq"),
-        "stats": ("stats", "statistics", "open_interest"),
-    }
-    selected: dict[str, str] = {}
-    for tool in tools:
-        name = str(tool.get("name") or "")
-        lower = name.lower()
-        if "future" not in lower and "futures" not in lower and "fx" not in lower:
-            continue
-        for group, keywords in keyword_groups.items():
-            if group not in selected and any(keyword in lower for keyword in keywords):
-                selected[group] = name
+    """通过 Gate REST API 直接获取合约深度、成交、统计等上下文，作为 raw records 保存。"""
+    rest = GateRestClient()
+    settle = "usdt"
+    contract = "BTC_USDT"
     called: dict[str, str] = {}
     errors: dict[str, str] = {}
-    for group, tool_name in selected.items():
-        args = {"settle": "usdt", "contract": "BTC_USDT", "limit": 20}
+    now = utc_now()
+
+    endpoints = {
+        "order_book": ("depth", lambda: rest.list_futures_order_book(settle, contract, limit=10)),
+        "trades": ("trades", lambda: rest.list_futures_trades(settle, contract, limit=100)),
+        "contract_stats": ("stats", lambda: rest.list_contract_stats(settle, contract, limit=100)),
+        "liquidation": ("liq_orders", lambda: rest.list_liquidated_orders(settle, contract, limit=100)),
+        "premium_index": ("premium", lambda: rest.list_futures_premium_index(settle, contract, interval="1h", limit=100)),
+    }
+
+    for group, (endpoint, caller) in endpoints.items():
         try:
-            safe_call_tool(client, conn, "mcp", tool_name, args)
-            called[group] = tool_name
+            data = caller()
+            record_mcp_call(
+                conn,
+                f"rest/{endpoint}",
+                endpoint,
+                {"settle": settle, "contract": contract},
+                {"response": data},
+                "success",
+                None,
+                0,
+            )
+            called[group] = endpoint
         except Exception as exc:
+            logger.warning("BTC contract context REST %s failed: %s", endpoint, exc)
             errors[group] = str(exc)
-    return {"synced": bool(called), "called": called, "errors": errors, "available_groups": sorted(selected)}
+
+    return {"synced": bool(called), "called": called, "errors": errors, "available_groups": sorted(called)}
 
 
 # ---------------------------------------------------------------------------
@@ -1274,6 +1682,11 @@ def _float(value: Any) -> float | None:
         return float(value)
     except (ValueError, TypeError):
         return None
+
+
+def _int(value: Any) -> int:
+    numeric = _float(value)
+    return int(numeric) if numeric is not None else 0
 
 
 def _default_client(conn: sqlite3.Connection) -> GateMCPClient:

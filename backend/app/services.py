@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import urllib.parse
 import urllib.request
 from datetime import timedelta
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from .database import DEFAULT_SETTINGS, parse_dt, row_to_dict, rows_to_dicts, setting_value_to_text, utc_now
 
@@ -100,7 +103,23 @@ def reset_default_settings(conn: sqlite3.Connection) -> dict[str, Any]:
             (key, setting_value_to_text(value, value_type), value_type, description, utc_now()),
         )
     conn.commit()
+    cleanup_stale_settings(conn)
     return list_settings(conn)
+
+
+def cleanup_stale_settings(conn: sqlite3.Connection) -> dict[str, Any]:
+    """删除数据库中不在 DEFAULT_SETTINGS 定义中的旧设置项，并返回清理结果。"""
+    valid_keys = set(DEFAULT_SETTINGS.keys())
+    rows = conn.execute("SELECT key FROM settings").fetchall()
+    stale_keys = [str(row["key"]) for row in rows if str(row["key"]) not in valid_keys]
+    deleted = 0
+    for key in stale_keys:
+        conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        deleted += 1
+    if deleted:
+        conn.commit()
+        logger.info("Cleaned up %d stale settings: %s", deleted, stale_keys)
+    return {"deleted": deleted, "stale_keys": stale_keys}
 
 
 def latest_market(
