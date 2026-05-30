@@ -2176,7 +2176,9 @@ export function App() {
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('market_memory_compact')} disabled={loading}>保存市场记忆</button>
           </div>
           <div className="run-list">
-            {(scheduler?.jobs || []).map((job) => (
+            {(scheduler?.jobs || [])
+              .filter((job) => job.id !== 'verify_due_at_next_prediction')
+              .map((job) => (
               <article className="run-card" key={job.id}>
                 <div className="run-head">
                   <strong>{job.id}</strong>

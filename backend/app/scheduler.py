@@ -168,5 +168,6 @@ def scheduler_status() -> dict[str, Any]:
                 "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
             }
             for job in _scheduler.get_jobs()
+            if job.id != DUE_VERIFICATION_JOB_ID
         ],
     }

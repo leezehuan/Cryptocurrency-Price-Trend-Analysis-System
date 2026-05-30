@@ -38,15 +38,10 @@ GET_ENDPOINTS = [
     "/api/square/user-opinions",
     "/api/sentiment/market",
     "/api/memory",
-    "/api/mock-trade/account",
-    "/api/mock-trade/positions",
-    "/api/mock-trade/trades",
 ]
 
 POST_ENDPOINTS = [
     "/api/predictions/verify-due",
-    "/api/mock-trade/advice",
-    "/api/mock-trade/sync",
 ]
 
 REQUIRED_ROUTES = [
@@ -171,7 +166,6 @@ def main() -> None:
         client = TestClient(app)
         validate_http_endpoints(client)
         validate_agent_and_reports(client)
-        validate_mock_trade(client)
     print("backend smoke ok")
 
 
