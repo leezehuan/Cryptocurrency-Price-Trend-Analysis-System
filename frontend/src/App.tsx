@@ -289,8 +289,6 @@ const GATE_STATUS_LABELS: Record<string, string> = {
   square_posts: '热门帖子',
   mcp_raw_records: 'MCP 原始记录',
   active_memories: '活跃记忆',
-  analyst_source_accounts: '分析师源账户',
-  followed_user_posts: '关注用户帖子',
 };
 
 type GateSyncTaskResult = {
@@ -443,6 +441,7 @@ type TradeAdvice = {
   suggested_size: number;
   suggested_price_type: string;
   reason: string;
+  current_leverage?: number;
   errors?: string[];
 };
 
@@ -465,6 +464,7 @@ type GatePosition = {
   realised_pnl?: string;
   margin?: string;
   value?: string;
+  notional_value_usdt?: string;
   mode?: string;
   error?: string;
 };
@@ -498,7 +498,7 @@ type GateTrade = {
 };
 
 // 前端视图枚举，对应顶部导航标签。
-type AppView = 'overview' | 'analysts' | 'predictions' | 'agent' | 'memory' | 'square' | 'mock_trade' | 'settings';
+type AppView = 'overview' | 'analysts' | 'predictions' | 'agent' | 'square' | 'mock_trade' | 'settings';
 
 // 默认 API 前缀为 /bit，可通过 Vite 环境变量覆盖。
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/bit';
@@ -508,7 +508,6 @@ const APP_VIEWS: { id: AppView; label: string; description: string }[] = [
   { id: 'analysts', label: '分析师数据', description: '评分与预测数据' },
   { id: 'predictions', label: '预测验证', description: '预测、验证与回放' },
   { id: 'agent', label: 'Agent 与报告', description: '运行记录、日报与人工确认' },
-  { id: 'memory', label: '市场记忆', description: '活跃记忆与历史信号' },
   { id: 'square', label: '广场热门', description: 'Gate 广场热帖与观点' },
   { id: 'mock_trade', label: '模拟交易', description: 'Testnet 模拟账户与 AI 建议下单' },
   { id: 'settings', label: '系统设置', description: '调度任务与配置项' }
@@ -954,6 +953,22 @@ export function App() {
     }
   };
 
+  const updateSetting = async (key: string, value: unknown) => {
+    try {
+      const result = await requestJson<{ success: boolean; error?: string }>(`/api/settings/${key}`, {
+        method: 'PUT',
+        body: JSON.stringify({ value })
+      });
+      if (!result.success) {
+        setMessage(`保存设置失败：${result.error || '未知错误'}`);
+      } else {
+        await loadAll();
+      }
+    } catch (error) {
+      setMessage(`保存设置失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const fetchTradeAdvice = async () => {
     setAdviceLoading(true);
     appendStreamEvent({ id: Date.now(), type: 'local', message: '开始生成 AI 交易建议…', created_at: new Date().toISOString() });
@@ -967,8 +982,9 @@ export function App() {
           price_type: advice.suggested_price_type || 'market',
           amount_usdt: String(advice.suggested_size || ''),
         });
-        setMessage(`AI 建议：${advice.suggested_direction === 'long' ? '开多' : advice.suggested_direction === 'short' ? '开空' : '观望'} ${advice.suggested_size || ''} USDT · ${advice.reason}`);
-        appendStreamEvent({ id: Date.now() + 1, type: 'local', message: `AI 建议：${advice.suggested_direction === 'long' ? '开多' : advice.suggested_direction === 'short' ? '开空' : '观望'} ${advice.suggested_size || ''} USDT`, created_at: new Date().toISOString(), output: { suggested_direction: advice.suggested_direction, suggested_size: advice.suggested_size, suggested_price_type: advice.suggested_price_type, reason: advice.reason } });
+        const levStr = advice.current_leverage ? `杠杆 ${advice.current_leverage}x · ` : '';
+        setMessage(`AI 建议：${advice.suggested_direction === 'long' ? '开多' : advice.suggested_direction === 'short' ? '开空' : '观望'} ${advice.suggested_size || ''} USDT · ${levStr}${advice.reason}`);
+        appendStreamEvent({ id: Date.now() + 1, type: 'local', message: `AI 建议：${advice.suggested_direction === 'long' ? '开多' : advice.suggested_direction === 'short' ? '开空' : '观望'} ${advice.suggested_size || ''} USDT${advice.current_leverage ? ` (杠杆 ${advice.current_leverage}x)` : ''}`, created_at: new Date().toISOString(), output: { suggested_direction: advice.suggested_direction, suggested_size: advice.suggested_size, suggested_price_type: advice.suggested_price_type, reason: advice.reason, current_leverage: advice.current_leverage } });
       } else {
         setMessage(advice.errors?.[0] || 'AI 建议生成失败');
         appendStreamEvent({ id: Date.now() + 1, type: 'error', message: `AI 建议生成失败：${advice.errors?.[0] || '未知错误'}`, created_at: new Date().toISOString() });
@@ -992,12 +1008,13 @@ export function App() {
     if (!window.confirm(`确认在 Testnet 执行 ${tradeForm.direction === 'long' ? '开多' : '开空'} ${amt} USDT ${priceTypeLabel}单 ${priceLabel}？`)) return;
     setLoading(true);
     try {
-      const result = await requestJson<{ success: boolean; order_id?: string; error?: string; balance?: number }>('/api/mock-trade/execute', {
+      const result = await requestJson<{ success: boolean; order_id?: string; error?: string; balance?: number; notional_value?: number; size?: number }>('/api/mock-trade/execute', {
         method: 'POST',
         body: JSON.stringify({ direction: tradeForm.direction, size: 1, price_type: tradeForm.price_type, amount_usdt: amt, price: Number(tradeForm.price) || 0 })
       });
       if (result.success) {
-        setMessage(`Testnet 下单成功：订单 ${result.order_id}，余额 ${result.balance}`);
+        const nv = result.notional_value ? `${result.notional_value.toFixed(2)} USDT` : `${result.size} 张`;
+        setMessage(`Testnet 下单成功：${nv}，订单 ${result.order_id}，余额 ${result.balance}`);
         appendStreamEvent({ id: Date.now(), type: 'local', message: `Testnet 下单成功：${result.order_id}`, created_at: new Date().toISOString(), output: result });
       } else {
         setMessage(`下单失败：${result.error || '未知错误'}`);
@@ -1329,7 +1346,7 @@ export function App() {
   const topAnalysts = rankedAnalysts.slice(0, 8);
   const analystDetailCards = (
     <div className="analyst-list">
-      {rankedAnalysts.map((analyst) => (
+      {rankedAnalysts.slice(0, 12).map((analyst) => (
         <article className="analyst-card" key={analyst.id}>
           <div>
             <strong>{analyst.name}</strong>
@@ -1364,10 +1381,10 @@ export function App() {
           <p>{run.market_summary}</p>
           <p>{run.opinion_summary}</p>
           <em>{run.output?.analysis_event || run.risk}</em>
-          {run.output?.react_tools_used && run.output.react_tools_used.length > 0 && (
+          {run.output?.react_tools_used && run.output.react_tools_used.filter((tool) => tool !== 'market_memory_search').length > 0 && (
             <div className="agent-tools-row">
               <span className="agent-label">ReAct 工具</span>
-              {run.output.react_tools_used.map((tool) => <span className="tag sideways" key={tool}>{tool}</span>)}
+              {run.output.react_tools_used.filter((tool) => tool !== 'market_memory_search').map((tool) => <span className="tag sideways" key={tool}>{tool}</span>)}
             </div>
           )}
           {run.output?.evidence_conflict?.has_conflict && (
@@ -1582,7 +1599,9 @@ export function App() {
           </div>
           {gateStatus ? (
             <div className="gate-card-stats">
-              {Object.entries(gateStatus).slice(0, 6).map(([key, value]) => {
+              {Object.entries(gateStatus)
+                .filter(([key]) => key in GATE_STATUS_LABELS) // 仅保留白名单中的键
+                .slice(0, 6).map(([key, value]) => {
                 const item = asRecord(value);
                 return <span key={key}>{GATE_STATUS_LABELS[key] || key}：{formatNumber(Number(item.count || 0), 0)} · {formatDate(String(item.latest || ''))}</span>;
               })}
@@ -1707,7 +1726,7 @@ export function App() {
               </tr>
             </thead>
             <tbody>
-              {pendingPredictions.map((prediction) => (
+              {pendingPredictions.slice(0, 20).map((prediction) => (
                 <tr key={prediction.id}>
                   <td>{prediction.analyst_name}</td>
                   <td><span className={`tag ${prediction.direction}`}>{directionText(prediction.direction)}</span></td>
@@ -1741,7 +1760,7 @@ export function App() {
                   </td>
                 </tr>
               )}
-              {visibleVerifiedPredictions.map((prediction) => (
+              {visibleVerifiedPredictions.slice(0, 20).map((prediction) => (
                 <tr className="verified-prediction-row" key={prediction.id}>
                   <td>{prediction.analyst_name}</td>
                   <td><span className={`tag ${prediction.direction}`}>{directionText(prediction.direction)}</span></td>
@@ -1838,17 +1857,6 @@ export function App() {
         </div>
       </section>
 
-      <section className={activeView === 'agent' ? 'panel' : 'hidden'}>
-        <div className="panel-title compact">
-          <div>
-            <h2>Agent 运行记录</h2>
-            <p>每次分析保留输入摘要、输出和节点过程。</p>
-          </div>
-          <Bot />
-        </div>
-        {agentRunList}
-      </section>
-
       <section className={activeView === 'agent' ? 'two-columns' : 'hidden'}>
         <div className="panel">
           <div className="panel-title compact">
@@ -1859,7 +1867,7 @@ export function App() {
             <BrainCircuit />
           </div>
           <div className="run-list">
-            {reports.map((report) => (
+            {reports.slice(0, 2).map((report) => (
               <article className="run-card" key={report.id}>
                 <div className="run-head">
                   <strong>{report.title}</strong>
@@ -1901,7 +1909,7 @@ export function App() {
             <ShieldAlert />
           </div>
           <div className="run-list">
-            {reviews.map((review) => (
+            {reviews.slice(0, 10).map((review) => (
               <article className="run-card" key={review.id}>
                 <div className="run-head">
                   <strong>{review.status}</strong>
@@ -1918,34 +1926,15 @@ export function App() {
         </div>
       </section>
 
-      <section className={activeView === 'memory' ? 'panel' : 'hidden'}>
+      <section className={activeView === 'agent' ? 'panel' : 'hidden'}>
         <div className="panel-title compact">
           <div>
-            <h2>市场记忆</h2>
-            <p>按重要性排序，展示 Agent 活跃记忆。共 {memories.length} 条。</p>
+            <h2>Agent 运行记录</h2>
+            <p>每次分析保留输入摘要、输出和节点过程。</p>
           </div>
-          <BrainCircuit />
+          <Bot />
         </div>
-        <div className="memory-grid">
-          {memories.map((mem) => (
-            <article className="memory-card" key={mem.id}>
-              <div className="memory-card-head">
-                <span className={`tag ${mem.sentiment || ''}`}>{memoryTypeText(mem.memory_type)}</span>
-                <span className="memory-importance">{formatNumber(mem.importance, 2)}</span>
-              </div>
-              <strong>{mem.title}</strong>
-              <p>{mem.content}</p>
-              <div className="memory-meta">
-                <span>情绪 {sentimentText(mem.sentiment)}</span>
-                {mem.expectation && <span>预期 {mem.expectation}</span>}
-                <span>来源 {mem.source || '-'}</span>
-                <span>{formatDate(mem.created_at)}</span>
-                {mem.valid_until && <span>有效至 {formatDate(mem.valid_until)}</span>}
-              </div>
-            </article>
-          ))}
-          {!memories.length && <div className="empty">暂无活跃市场记忆。可在"系统设置"中触发记忆压缩任务。</div>}
-        </div>
+        {agentRunList}
       </section>
 
       <section className={activeView === 'square' ? 'panel' : 'hidden'}>
@@ -1967,6 +1956,7 @@ export function App() {
               if (squareFilter === 'followed') return post.is_followed_user === 1;
               return true;
             })
+            .slice(0, 20)
             .map((post) => (
             <article className="square-card" key={post.id}>
               <div className="run-head">
@@ -2014,13 +2004,39 @@ export function App() {
               <div className="position-list" style={{ marginTop: '0.5rem' }}>
                 {gatePositions.map((pos, idx) => (
                   <div className="position-card" key={idx}>
-                    <span className={`tag ${Number(pos.size) > 0 ? 'long' : 'short'}`}>{Number(pos.size) > 0 ? '做多' : '做空'}</span>
-                    <span>{pos.contract} {Math.abs(pos.size)} 张</span>
-                    <span>入场 {pos.entry_price}</span>
-                    <span>标记 {pos.mark_price}</span>
-                    {pos.liq_price && <span>强平 {pos.liq_price}</span>}
-                    <span className={Number(pos.unrealised_pnl) >= 0 ? 'up' : 'down'}>未实现 {pos.unrealised_pnl}</span>
-                    <span>杠杆 {pos.leverage}x</span>
+                    <div className="position-head">
+                      <span className={`tag ${Number(pos.size) > 0 ? 'long' : 'short'}`}>{Number(pos.size) > 0 ? '做多' : '做空'}</span>
+                      <strong style={{ color: 'var(--text-main)', fontSize: '15px' }}>{pos.contract || '--'}</strong>
+                      <span className={Number(pos.unrealised_pnl || 0) >= 0 ? 'up' : 'down'} style={{ marginLeft: 'auto', fontWeight: 'bold' }}>
+                        {Number(pos.unrealised_pnl || 0) >= 0 ? '+' : ''}{isFinite(Number(pos.unrealised_pnl || 0)) ? Number(pos.unrealised_pnl || 0).toFixed(2) : '--'} USDT
+                      </span>
+                    </div>
+                    <div className="position-stats-grid">
+                      <div>
+                        <span>持仓名义价值</span>
+                        <strong>{isFinite(Number(pos.notional_value_usdt || 0)) ? Number(pos.notional_value_usdt || 0).toFixed(2) : '--'} USDT</strong>
+                      </div>
+                      <div>
+                        <span>仓位保证金</span>
+                        <strong>{isFinite(Number(pos.margin || 0)) ? Number(pos.margin || 0).toFixed(2) : '--'} USDT</strong>
+                      </div>
+                      <div>
+                        <span>杠杆倍数</span>
+                        <strong>{isFinite(Number(pos.leverage || 0)) ? `${Number(pos.leverage || 0)}x` : '--'}</strong>
+                      </div>
+                      <div>
+                        <span>入场价</span>
+                        <strong>{isFinite(Number(pos.entry_price || 0)) ? Number(pos.entry_price || 0).toFixed(2) : '--'}</strong>
+                      </div>
+                      <div>
+                        <span>标记价</span>
+                        <strong>{isFinite(Number(pos.mark_price || 0)) ? Number(pos.mark_price || 0).toFixed(2) : '--'}</strong>
+                      </div>
+                      <div>
+                        <span>强平价</span>
+                        <strong>{pos.liq_price && isFinite(Number(pos.liq_price)) ? Number(pos.liq_price).toFixed(2) : '--'}</strong>
+                      </div>
+                    </div>
                   </div>
                 ))}
                 <div className="inline-actions" style={{ marginTop: '0.5rem' }}>
@@ -2103,7 +2119,7 @@ export function App() {
                   <tr><th>订单ID</th><th>合约</th><th>方向</th><th>数量</th><th>价格</th><th>剩余</th><th>TIF</th><th>操作</th></tr>
                 </thead>
                 <tbody>
-                  {gateOrders.map((order) => (
+                  {gateOrders.slice(0, 20).map((order) => (
                     <tr key={order.order_id}>
                       <td>{order.order_id}</td>
                       <td>{order.contract}</td>
@@ -2125,7 +2141,7 @@ export function App() {
                   <tr><th>成交ID</th><th>合约</th><th>方向</th><th>数量</th><th>成交价</th><th>角色</th></tr>
                 </thead>
                 <tbody>
-                  {gateTrades.map((trade, idx) => (
+                  {gateTrades.slice(0, 20).map((trade, idx) => (
                     <tr key={trade.trade_id || idx}>
                       <td>{trade.trade_id}</td>
                       <td>{trade.contract}</td>
@@ -2174,14 +2190,16 @@ export function App() {
         <div className="panel">
           <div className="panel-title compact">
             <div>
-              <h2>Gate 数据源与账户映射</h2>
-              <p>展示 Gate 同步状态与 Square 指定用户映射。</p>
+              <h2>Gate 数据源状态</h2>
+              <p>展示各数据表的记录条数与最近更新时间。</p>
             </div>
             <Database />
           </div>
           {gateStatus ? (
             <div className="settings-grid source-status-grid">
-              {Object.entries(gateStatus).map(([key, value]) => {
+              {Object.entries(gateStatus)
+                .filter(([key]) => key in GATE_STATUS_LABELS) // 仅保留白名单中的键
+                .map(([key, value]) => {
                 const item = asRecord(value);
                 return (
                   <div className="setting-item" key={key}>
@@ -2193,23 +2211,6 @@ export function App() {
               })}
             </div>
           ) : <div className="empty">暂无数据源状态。</div>}
-          <div className="run-list source-account-list">
-            {sourceAccounts.map((account, index) => (
-              <article className="run-card" key={`${account.source_platform || 'source'}-${account.source_user_id || index}`}>
-                <div className="run-head">
-                  <strong>{account.display_name || account.source_user_id || '未命名账户'}</strong>
-                  <span>{account.enabled ? '启用' : '停用'}</span>
-                </div>
-                <div className="mini-grid">
-                  <span>平台 {account.source_platform || '-'}</span>
-                  <span>用户 {account.source_user_id || '-'}</span>
-                  <span>分析师 ID {account.analyst_id ?? '-'}</span>
-                  <span>创建 {formatDate(account.created_at)}</span>
-                </div>
-              </article>
-            ))}
-            {!sourceAccounts.length && <div className="empty">暂无 Square 指定用户映射。</div>}
-          </div>
         </div>
 
         <div className="panel">
@@ -2224,7 +2225,42 @@ export function App() {
             {settings.map((item) => (
               <div className="setting-item" key={item.key}>
                 <strong>{item.description || item.key}</strong>
-                <span>{settingValueText(item.parsed_value)}</span>
+                <div className="setting-input-row">
+                  {item.value_type === 'boolean' ? (
+                    <select
+                      value={String(item.parsed_value)}
+                      onChange={(e) => updateSetting(item.key, e.target.value === 'true')}
+                    >
+                      <option value="true">是</option>
+                      <option value="false">否</option>
+                    </select>
+                  ) : item.value_type === 'number' ? (
+                    <input
+                      type="number"
+                      defaultValue={String(item.parsed_value)}
+                      onBlur={(e) => updateSetting(item.key, Number(e.target.value))}
+                    />
+                  ) : item.value_type === 'json' ? (
+                    <textarea
+                      defaultValue={JSON.stringify(item.parsed_value, null, 2)}
+                      onBlur={(e) => {
+                        try {
+                          const val = JSON.parse(e.target.value);
+                          void updateSetting(item.key, val);
+                        } catch {
+                          setMessage(`设置项 ${item.key} 的 JSON 格式有误`);
+                        }
+                      }}
+                      rows={3}
+                    />
+                  ) : (
+                    <input
+                      type="text"
+                      defaultValue={String(item.parsed_value)}
+                      onBlur={(e) => updateSetting(item.key, e.target.value)}
+                    />
+                  )}
+                </div>
                 <small>{item.key}</small>
               </div>
             ))}

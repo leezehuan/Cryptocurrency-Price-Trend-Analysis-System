@@ -95,6 +95,9 @@ class GateTestnetTradeClient:
                     "realised_pnl": str(p.realised_pnl) if hasattr(p, "realised_pnl") else "0",
                     "margin": str(p.margin) if hasattr(p, "margin") else "0",
                     "value": str(p.value) if hasattr(p, "value") else "0",
+                    "notional_value_usdt": str(
+                        abs(float(p.value or 0))
+                    ) if hasattr(p, "value") and p.value is not None else "0",
                     "mode": str(p.mode) if hasattr(p, "mode") else "",
                 }
                 for p in positions
@@ -293,10 +296,22 @@ def execute_mock_trade(conn: sqlite3.Connection, direction: str, size: int = 1, 
     except Exception:
         live_price = 0
 
-    # 如果传入 amount_usdt，按当前价格换算为张数（向上取整，至少 1）
+    # 获取合约信息（quanto_multiplier、最小单量等）
+    quanto_multiplier = 0.0001  # BTC_USDT 默认每张 0.0001 BTC
+    min_size = 1
+    try:
+        contract_info = client.futures_api.get_futures_contract(DEFAULT_SETTLE, DEFAULT_CONTRACT)
+        quanto_multiplier = float(getattr(contract_info, "quanto_multiplier", "0.0001") or "0.0001")
+        min_size = int(getattr(contract_info, "order_size_min", 1) or 1)
+    except Exception:
+        pass
+
+    # 如果传入 amount_usdt，按当前价格和合约乘数换算为张数（向上取整，至少 1）
+    # 每张价值 = live_price × quanto_multiplier（如 BTC_USDT: 73721.9 × 0.0001 ≈ 7.37 USDT/张）
     if amount_usdt > 0 and live_price > 0:
         import math
-        size = max(1, int(math.ceil(amount_usdt / live_price)))
+        per_contract_value = live_price * quanto_multiplier
+        size = max(1, int(math.ceil(amount_usdt / per_contract_value))) if per_contract_value > 0 else 1
 
     # 风控 3：检查反向持仓
     reverse_direction = "short" if direction == "long" else "long"
@@ -307,18 +322,21 @@ def execute_mock_trade(conn: sqlite3.Connection, direction: str, size: int = 1, 
                 return {"success": False, "error": f"已持有反向持仓（{reverse_direction}），请先平仓后再开新方向"}
 
     # 风控 4：合约最小单量检查
-    try:
-        contract_info = client.futures_api.get_futures_contract(DEFAULT_SETTLE, DEFAULT_CONTRACT)
-        min_size = int(getattr(contract_info, "order_size_min", 1))
-        if size < min_size:
-            return {"success": False, "error": f"下单数量不能小于合约最小单量 {min_size}"}
-    except Exception:
-        min_size = 1
+    if size < min_size:
+        return {"success": False, "error": f"下单数量不能小于合约最小单量 {min_size}"}
 
-    # 风控 5：余额是否足够（粗略估算）
-    margin_needed = (size * live_price * 0.001) if live_price else 0
+    # 风控 5：余额是否足够（粗略估算，考虑合约乘数和杠杆）
+    current_leverage = 1
+    try:
+        position_data = client.get_position(DEFAULT_SETTLE, DEFAULT_CONTRACT)
+        if "error" not in position_data:
+            lev_str = position_data.get("leverage", "1")
+            current_leverage = int(float(lev_str)) if lev_str else 1
+    except Exception:
+        pass
+    margin_needed = (size * live_price * quanto_multiplier / current_leverage) if live_price else 0
     if available_remote < margin_needed * 1.1:
-        return {"success": False, "error": f"Testnet 可用余额不足（当前 {available_remote}，预估需 {margin_needed:.2f} USDT）"}
+        return {"success": False, "error": f"Testnet 可用余额不足（当前 {available_remote}，预估需 {margin_needed:.2f} USDT，杠杆 {current_leverage}x）"}
 
     # 下单
     order_size = size if direction == "long" else -size
@@ -332,7 +350,7 @@ def execute_mock_trade(conn: sqlite3.Connection, direction: str, size: int = 1, 
     fill_price = float(result.get("fill_price") or result.get("price") or 0)
     if fill_price <= 0:
         fill_price = live_price or 0
-    fee = fill_price * abs(size) * 0.0005
+    fee = fill_price * abs(size) * quanto_multiplier * 0.0005
 
     return {
         "success": True,
@@ -343,6 +361,8 @@ def execute_mock_trade(conn: sqlite3.Connection, direction: str, size: int = 1, 
         "fill_price": fill_price,
         "fee": fee,
         "balance": available_remote,
+        "notional_value": fill_price * abs(size) * quanto_multiplier,
+        "current_leverage": current_leverage,
     }
 
 
@@ -363,11 +383,26 @@ def generate_trade_advice(conn: sqlite3.Connection) -> dict[str, Any]:
     client = _get_testnet_client(conn)
     if client is None:
         # 未配置 API Key 时，仅基于 Agent 信号生成建议
-        return _rule_trade_advice(signal, current_price, 0, [], output.get("errors", ["未配置 Gate Testnet API Key，使用规则建议"]))
+        return _rule_trade_advice(signal, current_price, 0, [], output.get("errors", ["未配置 Gate Testnet API Key，使用规则建议"]), leverage=1)
 
     remote_account = client.get_futures_account(DEFAULT_SETTLE)
     positions = client.list_positions()
     available_balance = float(remote_account.get("available", 0)) if "error" not in remote_account else 0
+
+    # 查询当前合约杠杆（无持仓时从合约信息获取默认最大值）
+    current_leverage = 1
+    try:
+        position_data = client.get_position(DEFAULT_SETTLE, DEFAULT_CONTRACT)
+        if "error" not in position_data:
+            lev_str = position_data.get("leverage", "1")
+            current_leverage = int(float(lev_str)) if lev_str else 1
+    except Exception:
+        try:
+            contract_info = client.futures_api.get_futures_contract(DEFAULT_SETTLE, DEFAULT_CONTRACT)
+            lev_max = getattr(contract_info, "leverage_max", "1")
+            current_leverage = int(float(lev_max)) if lev_max else 1
+        except Exception:
+            current_leverage = 1
 
     position_summary = []
     long_pos = 0
@@ -403,6 +438,7 @@ def generate_trade_advice(conn: sqlite3.Connection) -> dict[str, Any]:
         "position_margin": position_margin,
         "position_summary": "；".join(position_summary) if position_summary else "当前无持仓",
         "contract": DEFAULT_CONTRACT,
+        "current_leverage": current_leverage,
     }
 
     try:
@@ -418,10 +454,11 @@ def generate_trade_advice(conn: sqlite3.Connection) -> dict[str, Any]:
             "suggested_size": data.get("suggested_size", 0),
             "suggested_price_type": data.get("suggested_price_type", "market"),
             "reason": data.get("reason", ""),
+            "current_leverage": current_leverage,
         }
 
     # LLM 被拦截或失败时，使用规则兜底生成建议
-    return _rule_trade_advice(signal, current_price, available_balance, {"long": long_pos, "short": short_pos}, output.get("errors", ["LLM 被拦截，使用规则建议"]))
+    return _rule_trade_advice(signal, current_price, available_balance, {"long": long_pos, "short": short_pos}, output.get("errors", ["LLM 被拦截，使用规则建议"]), leverage=current_leverage)
 
 
 def _rule_trade_advice(
@@ -430,6 +467,7 @@ def _rule_trade_advice(
     balance: float,
     positions: dict[str, int],
     llm_errors: list[str],
+    leverage: int = 1,
 ) -> dict[str, Any]:
     """基于 Agent 分析信号和账户状态的规则建议兜底。
 
@@ -442,6 +480,10 @@ def _rule_trade_advice(
 
     long_pos = int(positions.get("long", 0))
     short_pos = int(positions.get("short", 0))
+
+    # 杠杆倍率影响最大建议仓位比例（杠杆越高，名义仓位可越大，但保证金风险不变）
+    max_pct = min(0.20, 0.10 * leverage)  # 默认 10%，高杠杆最多放宽到 20%
+    conservative_pct = max_pct * 0.5  # 保守半仓
 
     reasons: list[str] = []
     suggested_direction = "hold"
@@ -457,10 +499,10 @@ def _rule_trade_advice(
         else:
             suggested_direction = "long"
             if confidence == "high":
-                suggested_size = round(balance * 0.10, 2)
+                suggested_size = round(balance * max_pct, 2)
             else:
-                suggested_size = round(balance * 0.05, 2)
-            reasons.append(f"Agent 信号看多（置信度 {confidence}），建议开多 {suggested_size} USDT。")
+                suggested_size = round(balance * conservative_pct, 2)
+            reasons.append(f"Agent 信号看多（置信度 {confidence}），当前杠杆 {leverage}x，建议开多 {suggested_size} USDT。")
     elif decision == "bearish":
         if long_pos > 0:
             suggested_direction = "hold"
@@ -468,10 +510,10 @@ def _rule_trade_advice(
         else:
             suggested_direction = "short"
             if confidence == "high":
-                suggested_size = round(balance * 0.10, 2)
+                suggested_size = round(balance * max_pct, 2)
             else:
-                suggested_size = round(balance * 0.05, 2)
-            reasons.append(f"Agent 信号看空（置信度 {confidence}），建议开空 {suggested_size} USDT。")
+                suggested_size = round(balance * conservative_pct, 2)
+            reasons.append(f"Agent 信号看空（置信度 {confidence}），当前杠杆 {leverage}x，建议开空 {suggested_size} USDT。")
     else:
         suggested_direction = "hold"
         reasons.append("市场信号中性，暂无明确方向，建议观望。")
@@ -484,7 +526,7 @@ def _rule_trade_advice(
     if suggested_size > 0 and suggested_size < 1:
         suggested_size = 1.0
 
-    reasons.append(f"当前 BTC 价格 {current_price} USDT，账户余额 {balance} USDT。（{llm_errors[0]}）")
+    reasons.append(f"当前 BTC 价格 {current_price} USDT，账户余额 {balance} USDT，杠杆 {leverage}x。（{llm_errors[0]}）")
 
     return {
         "success": True,
@@ -492,4 +534,5 @@ def _rule_trade_advice(
         "suggested_size": suggested_size,
         "suggested_price_type": "market",
         "reason": " ".join(reasons),
+        "current_leverage": leverage,
     }
