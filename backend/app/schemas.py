@@ -72,5 +72,30 @@ class MarketMemoryCreate(BaseModel):
     valid_until: str | None = None
 
 
+class MockTradeExecuteCreate(BaseModel):
+    direction: str = Field(default="long", pattern="^(long|short)$")
+    size: int = Field(default=1, ge=1)
+    price_type: str = Field(default="market", pattern="^(market|limit)$")
+    amount_usdt: float = Field(default=0.0, ge=0)
+    price: float = Field(default=0.0, ge=0)
+
+
+class GateCancelOrderRequest(BaseModel):
+    order_id: str
+
+
+class GateCancelAllOrdersRequest(BaseModel):
+    contract: str = Field(default="BTC_USDT")
+
+
+class GateUpdateLeverageRequest(BaseModel):
+    leverage: str = Field(default="10")
+    cross_leverage_limit: str = Field(default="")
+
+
+class GateUpdateMarginRequest(BaseModel):
+    change: str = Field(default="0")
+
+
 class ApiMessage(BaseModel):
     message: str

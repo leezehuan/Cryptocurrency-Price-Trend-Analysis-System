@@ -138,6 +138,12 @@ button:disabled {
   background: rgba(127, 29, 29, 0.28);
 }
 
+.ghost-button.tiny {
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  border-radius: 4px;
+}
+
 .tiny {
   min-height: 30px;
   padding: 0 10px;
@@ -724,6 +730,55 @@ pre {
   box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.1);
 }
 
+.analyst-combobox-label .analyst-combobox {
+  position: relative;
+}
+
+.analyst-combobox input {
+  width: 100%;
+}
+
+.analyst-dropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  background: #0f172a;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.analyst-dropdown li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  color: #e2e8f0;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.analyst-dropdown li:hover {
+  background: rgba(34, 211, 238, 0.12);
+}
+
+.analyst-dropdown li + li {
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.analyst-dropdown-score {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
 .manual-edit-form {
   display: grid;
   gap: 14px;
@@ -1239,5 +1294,159 @@ td {
   .leaderboard-item .score-pill {
     grid-column: 1 / -1;
     justify-self: start;
+  }
+}
+
+/* ---------- Mock Trade ---------- */
+
+.mock-trade-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.mock-trade-grid {
+  display: grid;
+  grid-template-columns: 280px 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.mock-trade-grid .account-panel,
+.mock-trade-grid .trade-form-panel,
+.mock-trade-grid .history-panel {
+  padding: 0.75rem;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
+
+.account-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+}
+
+.account-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.account-row:last-child {
+  border-bottom: none;
+}
+
+.position-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.position-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background: var(--bg-main);
+  border: 1px solid var(--border-subtle);
+  font-size: 0.85rem;
+}
+
+.trade-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.direction-radio {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.35rem;
+}
+
+.direction-radio label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.slider-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.slider-label {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+
+.slider-row input[type="range"] {
+  width: 100%;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.slider-marks {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.slider-mark {
+  flex: 1;
+  padding: 0.3rem 0;
+  font-size: 0.8rem;
+  text-align: center;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-main);
+  color: var(--text-main);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.slider-mark:hover {
+  background: var(--bg-elevated);
+  border-color: var(--accent);
+}
+
+.trade-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.trade-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.trade-history-table th,
+.trade-history-table td {
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.trade-history-table th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+@media (max-width: 960px) {
+  .mock-trade-grid {
+    grid-template-columns: 1fr;
   }
 }

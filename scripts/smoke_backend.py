@@ -38,10 +38,15 @@ GET_ENDPOINTS = [
     "/api/square/user-opinions",
     "/api/sentiment/market",
     "/api/memory",
+    "/api/mock-trade/account",
+    "/api/mock-trade/positions",
+    "/api/mock-trade/trades",
 ]
 
 POST_ENDPOINTS = [
     "/api/predictions/verify-due",
+    "/api/mock-trade/advice",
+    "/api/mock-trade/sync",
 ]
 
 REQUIRED_ROUTES = [
@@ -133,6 +138,16 @@ def validate_agent_and_reports(client: TestClient) -> None:
     assert_true("daily report contract field", "contract_status" in report_data)
 
 
+def validate_mock_trade(client: TestClient) -> None:
+    account = client.get("/api/mock-trade/account")
+    assert_ok("/api/mock-trade/account", account.status_code)
+    account_data = account.json()
+    assert_true("mock account id", isinstance(account_data.get("account", {}).get("id"), int))
+    execute = client.post("/api/mock-trade/execute", json={"direction": "long", "size": 1, "price_type": "market"})
+    assert_ok("/api/mock-trade/execute", execute.status_code)
+    print("mock_trade smoke ok")
+
+
 def validate_http_endpoints(client: TestClient) -> None:
     for path in GET_ENDPOINTS:
         response = client.get(path)
@@ -156,6 +171,7 @@ def main() -> None:
         client = TestClient(app)
         validate_http_endpoints(client)
         validate_agent_and_reports(client)
+        validate_mock_trade(client)
     print("backend smoke ok")
 
 

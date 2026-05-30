@@ -71,6 +71,12 @@ DEFAULT_SETTINGS: dict[str, tuple[Any, str, str]] = {
     "scheduler.gate_square_user_sync_minutes": (15, "int", "Gate Square 指定用户观点同步间隔分钟数"),
     "square.followed_users": ([], "json", "Gate 广场关注用户列表 [{source_user_id, display_name}]"),
     "news.keywords": (["BTC", "Bitcoin", "FOMC", "CPI", "Fed"], "json", "新闻采集关键词列表"),
+    # Mock Trade 模拟交易配置
+    "mock_trade.enabled": (False, "bool", "是否启用模拟交易功能"),
+    "mock_trade.testnet_api_key": ("", "str", "Gate Testnet API Key"),
+    "mock_trade.testnet_api_secret": ("", "str", "Gate Testnet API Secret"),
+    "mock_trade.initial_balance": (10000.0, "float", "模拟账户初始 USDT 余额"),
+    "scheduler.mock_trade_sync_minutes": (5, "int", "模拟账户 Testnet 同步间隔分钟数"),
 }
 
 # PostgreSQL 包装层需要对这些表的 INSERT 自动追加 RETURNING id。
@@ -95,6 +101,9 @@ ID_TABLES = {
     "market_sentiment_snapshots",
     "market_memories",
     "analyst_source_accounts",
+    "mock_accounts",
+    "mock_positions",
+    "mock_trades",
 }
 
 
@@ -857,6 +866,53 @@ def init_db() -> None:
                 UNIQUE(source_platform, source_user_id)
             );
             CREATE INDEX IF NOT EXISTS idx_analyst_source_platform ON analyst_source_accounts(source_platform, enabled);
+
+            CREATE TABLE IF NOT EXISTS mock_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '默认模拟账户',
+                initial_balance REAL NOT NULL DEFAULT 10000,
+                current_balance REAL NOT NULL DEFAULT 10000,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mock_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                contract TEXT NOT NULL,
+                settle TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                size INTEGER NOT NULL DEFAULT 0,
+                entry_price REAL NOT NULL DEFAULT 0,
+                current_price REAL,
+                unrealized_pnl REAL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (account_id) REFERENCES mock_accounts(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mock_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                contract TEXT NOT NULL,
+                settle TEXT NOT NULL,
+                side TEXT NOT NULL,
+                size INTEGER NOT NULL DEFAULT 0,
+                price REAL NOT NULL DEFAULT 0,
+                realized_pnl REAL NOT NULL DEFAULT 0,
+                fee REAL NOT NULL DEFAULT 0,
+                gate_order_id TEXT,
+                gate_status TEXT,
+                trade_type TEXT NOT NULL DEFAULT 'order',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (account_id) REFERENCES mock_accounts(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mock_positions_account ON mock_positions(account_id);
+            CREATE INDEX IF NOT EXISTS idx_mock_trades_account ON mock_trades(account_id);
+            CREATE INDEX IF NOT EXISTS idx_mock_trades_order_id ON mock_trades(gate_order_id);
             """
         )
         migrate_market_data_unique_constraint(conn)

@@ -14,7 +14,7 @@ from .config_loader import load_runtime_config
 from .database import clear_demo_data, connect, init_db, sync_market_history, sync_market_intervals, sync_real_market_data
 from .llm_client import test_model_connection
 from .scheduler import scheduler_status, start_scheduler, stop_scheduler
-from .schemas import AgentRunCreate, GateSyncCreate, MarketHistorySyncCreate, MarketIntervalsSyncCreate, MarketMemoryCreate, OpinionCreate, PredictionManualUpdate, ReviewConfirmCreate, ReviewRejectCreate, SettingUpdate
+from .schemas import AgentRunCreate, GateCancelAllOrdersRequest, GateCancelOrderRequest, GateSyncCreate, GateUpdateLeverageRequest, GateUpdateMarginRequest, MarketHistorySyncCreate, MarketIntervalsSyncCreate, MarketMemoryCreate, MockTradeExecuteCreate, OpinionCreate, PredictionManualUpdate, ReviewConfirmCreate, ReviewRejectCreate, SettingUpdate
 from .services import (
     confirm_human_review,
     create_opinion,
@@ -51,7 +51,7 @@ from .services import (
     update_prediction_manual,
     verify_due_predictions,
 )
-from .gate_mcp import (
+from .gate_sync import (
     active_market_memories,
     gate_mcp_source_status,
     latest_btc_contract_metrics,
@@ -59,6 +59,11 @@ from .gate_mcp import (
     list_analyst_source_accounts,
     recent_followed_user_posts,
     recent_square_posts,
+)
+from .mock_trade import (
+    _get_testnet_client,
+    execute_mock_trade,
+    generate_trade_advice,
 )
 
 _shutdown_event: asyncio.Event | None = None
@@ -346,7 +351,10 @@ def get_agent_stream_events(
 async def get_agent_stream(after_id: int = Query(default=0, ge=0)) -> StreamingResponse:
     async def event_generator() -> Generator[str, None, None]:
         # 使用 SSE 持续推送 Agent 节点输出；无新事件时发送心跳。
-        last_id = after_id
+        # 以当前数据库最大 id 为起点，只推送新事件，不回溯历史。
+        with connect() as conn:
+            max_row = conn.execute("SELECT MAX(id) FROM agent_node_runs").fetchone()
+        last_id = max(after_id, int(max_row[0]) if max_row and max_row[0] else 0)
         while True:
             if _shutdown_event is not None and _shutdown_event.is_set():
                 break
@@ -627,3 +635,105 @@ def get_agent_run_reflection(
         "reflection": output_snap.get("reflection", {}),
         "node_runs": nodes,
     }
+
+
+# ---------------------------------------------------------------------------
+# Mock Trade API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/mock-trade/advice")
+def post_mock_trade_advice(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    return generate_trade_advice(db)
+
+
+@app.post("/api/mock-trade/execute")
+def post_mock_trade_execute(
+    payload: MockTradeExecuteCreate,
+    db: sqlite3.Connection = Depends(get_db),
+) -> dict[str, object]:
+    return execute_mock_trade(db, payload.direction, payload.size, payload.price_type, payload.amount_usdt, payload.price)
+
+
+# ---------------------------------------------------------------------------
+# Gate Testnet Proxy API — 直接查询/操作 Gate Testnet 账户
+# ---------------------------------------------------------------------------
+
+@app.get("/api/gate/account")
+def get_gate_account(db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    client = _get_testnet_client(db)
+    if client is None:
+        return {"error": "未配置 Testnet API Key"}
+    return client.get_futures_account()
+
+
+@app.get("/api/gate/positions")
+def get_gate_positions(db: sqlite3.Connection = Depends(get_db)) -> list[dict[str, object]]:
+    client = _get_testnet_client(db)
+    if client is None:
+        return [{"error": "未配置 Testnet API Key"}]
+    return client.list_positions()
+
+
+@app.get("/api/gate/orders")
+def get_gate_orders(
+    status: str = Query(default="open", pattern="^(open|finished)$"),
+    contract: str = Query(default="BTC_USDT"),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: sqlite3.Connection = Depends(get_db),
+) -> list[dict[str, object]]:
+    client = _get_testnet_client(db)
+    if client is None:
+        return [{"error": "未配置 Testnet API Key"}]
+    return client.list_futures_orders(status=status, contract=contract, limit=limit)
+
+
+@app.get("/api/gate/orders/{order_id}")
+def get_gate_order(order_id: str, db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    client = _get_testnet_client(db)
+    if client is None:
+        return {"error": "未配置 Testnet API Key"}
+    return client.get_futures_order(order_id)
+
+
+@app.post("/api/gate/orders/cancel")
+def cancel_gate_order(payload: GateCancelOrderRequest, db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    client = _get_testnet_client(db)
+    if client is None:
+        return {"error": "未配置 Testnet API Key"}
+    return client.cancel_futures_order(order_id=payload.order_id)
+
+
+@app.post("/api/gate/orders/cancel-all")
+def cancel_all_gate_orders(payload: GateCancelAllOrdersRequest, db: sqlite3.Connection = Depends(get_db)) -> list[dict[str, object]]:
+    client = _get_testnet_client(db)
+    if client is None:
+        return [{"error": "未配置 Testnet API Key"}]
+    return client.cancel_all_futures_orders(contract=payload.contract)
+
+
+@app.post("/api/gate/positions/leverage")
+def update_gate_leverage(payload: GateUpdateLeverageRequest, db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    client = _get_testnet_client(db)
+    if client is None:
+        return {"error": "未配置 Testnet API Key"}
+    return client.update_position_leverage(leverage=payload.leverage, cross_leverage_limit=payload.cross_leverage_limit)
+
+
+@app.post("/api/gate/positions/margin")
+def update_gate_margin(payload: GateUpdateMarginRequest, db: sqlite3.Connection = Depends(get_db)) -> dict[str, object]:
+    client = _get_testnet_client(db)
+    if client is None:
+        return {"error": "未配置 Testnet API Key"}
+    return client.update_position_margin(change=payload.change)
+
+
+@app.get("/api/gate/trades")
+def get_gate_trades(
+    contract: str = Query(default="BTC_USDT"),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: sqlite3.Connection = Depends(get_db),
+) -> list[dict[str, object]]:
+    client = _get_testnet_client(db)
+    if client is None:
+        return [{"error": "未配置 Testnet API Key"}]
+    return client.get_my_trades(contract=contract, limit=limit)

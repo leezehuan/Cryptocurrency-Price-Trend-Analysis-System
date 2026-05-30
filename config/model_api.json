@@ -20,6 +20,22 @@
       "temperature": 0.2,
       "max_tokens": 1200,
       "timeout_seconds": 60
+    },
+    "mock_trade": {
+      "name": "Mock Trade Advice API",
+      "base_url": "https://api.mnapi.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "api_key": "sk-4oFkrsyl07wZkHjqGF2ilp4rDrgx6Dt9os0mCmrTAdMA62im",
+      "chat_model": "gpt-4o-mini",
+      "temperature": 0.2,
+      "max_tokens": 1200,
+      "timeout_seconds": 30
+    },
+    "gate_testnet": {
+      "name": "Gate Testnet Futures API",
+      "api_key": "f4ceea21cbaaa318bd1e7e4cf21df32c",
+      "api_secret": "e330008be0f4d35cab69ee2081cf3d76accc2cc219c30086c31db8d158a46474",
+      "host": "https://api-testnet.gateapi.io/api/v4"
     }
   }
 }

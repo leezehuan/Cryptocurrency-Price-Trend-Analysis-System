@@ -283,6 +283,16 @@ type BtcContract = {
 
 type GateSourceStatus = Record<string, { count?: number; latest?: string | null } | Record<string, unknown>>;
 
+const GATE_STATUS_LABELS: Record<string, string> = {
+  btc_contract_metrics: 'BTC 合约数据',
+  sentiment_snapshots: '市场情绪快照',
+  square_posts: '热门帖子',
+  mcp_raw_records: 'MCP 原始记录',
+  active_memories: '活跃记忆',
+  analyst_source_accounts: '分析师源账户',
+  followed_user_posts: '关注用户帖子',
+};
+
 type GateSyncTaskResult = {
   status?: string;
   error?: string;
@@ -426,8 +436,69 @@ type AgentRunReplay = {
   focus_predictions?: Prediction[];
 };
 
+
+type TradeAdvice = {
+  success: boolean;
+  suggested_direction: string;
+  suggested_size: number;
+  suggested_price_type: string;
+  reason: string;
+  errors?: string[];
+};
+
+type GateFuturesAccount = {
+  currency?: string;
+  available?: string;
+  total?: string;
+  position_margin?: string;
+  error?: string;
+};
+
+type GatePosition = {
+  contract: string;
+  size: number;
+  leverage: string;
+  entry_price: string;
+  mark_price: string;
+  liq_price?: string;
+  unrealised_pnl: string;
+  realised_pnl?: string;
+  margin?: string;
+  value?: string;
+  mode?: string;
+  error?: string;
+};
+
+type GateOrder = {
+  order_id: string;
+  status: string;
+  contract: string;
+  size: number;
+  price: string;
+  left: number;
+  fill_price?: string;
+  text?: string;
+  tif?: string;
+  create_time?: number;
+  is_close?: boolean;
+  reduce_only?: boolean;
+  error?: string;
+};
+
+type GateTrade = {
+  trade_id?: string;
+  order_id?: string;
+  contract?: string;
+  size?: number;
+  price?: string;
+  fill_price?: string;
+  role?: string;
+  create_time?: number;
+  error?: string;
+};
+
 // 前端视图枚举，对应顶部导航标签。
-type AppView = 'overview' | 'analysts' | 'predictions' | 'agent' | 'memory' | 'square' | 'settings';
+type AppView = 'overview' | 'analysts' | 'predictions' | 'agent' | 'memory' | 'square' | 'mock_trade' | 'settings';
 
 // 默认 API 前缀为 /bit，可通过 Vite 环境变量覆盖。
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/bit';
@@ -439,6 +510,7 @@ const APP_VIEWS: { id: AppView; label: string; description: string }[] = [
   { id: 'agent', label: 'Agent 与报告', description: '运行记录、日报与人工确认' },
   { id: 'memory', label: '市场记忆', description: '活跃记忆与历史信号' },
   { id: 'square', label: '广场热门', description: 'Gate 广场热帖与观点' },
+  { id: 'mock_trade', label: '模拟交易', description: 'Testnet 模拟账户与 AI 建议下单' },
   { id: 'settings', label: '系统设置', description: '调度任务与配置项' }
 ];
 
@@ -668,6 +740,7 @@ export function App() {
   const [predictionReplay, setPredictionReplay] = useState<PredictionReplay | null>(null);
   const [agentReplay, setAgentReplay] = useState<AgentRunReplay | null>(null);
   const [analystName, setAnalystName] = useState('');
+  const [analystDropdownOpen, setAnalystDropdownOpen] = useState(false);
   const [content, setContent] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
   const [loading, setLoading] = useState(false);
@@ -686,6 +759,12 @@ export function App() {
   const [gateStatus, setGateStatus] = useState<GateSourceStatus | null>(null);
   const [sourceAccounts, setSourceAccounts] = useState<SourceAccount[]>([]);
   const [squareFilter, setSquareFilter] = useState<'all' | 'hot' | 'followed'>('all');
+  const [tradeForm, setTradeForm] = useState<{ direction: string; price_type: string; price: string; amount_usdt: string }>({ direction: 'long', price_type: 'market', price: '', amount_usdt: '' });
+  const [adviceLoading, setAdviceLoading] = useState(false);
+  const [gateFuturesAccount, setGateFuturesAccount] = useState<GateFuturesAccount | null>(null);
+  const [gatePositions, setGatePositions] = useState<GatePosition[]>([]);
+  const [gateOrders, setGateOrders] = useState<GateOrder[]>([]);
+  const [gateTrades, setGateTrades] = useState<GateTrade[]>([]);
 
   const appendStreamEvent = (event: AgentStreamEvent) => {
     // 追加 SSE 事件并按 id 去重，只保留最近 80 条用于调试面板展示。
@@ -737,7 +816,7 @@ export function App() {
         memoryData,
         squareData,
         gateStatusData,
-        sourceAccountData
+        sourceAccountData,
       ] = await Promise.all([
         requestJson<Dashboard>('/api/dashboard'),
         requestJson<MarketRow[]>(`/api/market?interval=${marketInterval}&limit=120`),
@@ -801,16 +880,24 @@ export function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  // 新事件到达时自动滚动到调试列表底部
+  // 切换到模拟交易视图时自动刷新 Gate 数据
+  useEffect(() => {
+    if (activeView === 'mock_trade') {
+      void loadGateData();
+    }
+  }, [activeView]);
+
+  // 新事件到达时自动滚动到调试列表顶部
   useEffect(() => {
     if (streamListRef.current && !debugPanelCollapsed) {
-      streamListRef.current.scrollTop = streamListRef.current.scrollHeight;
+      streamListRef.current.scrollTop = 0;
     }
   }, [streamEvents, debugPanelCollapsed]);
 
   useEffect(() => {
-    // 通过 SSE 订阅 Agent 节点输出和心跳事件。
-    const source = new EventSource(`${API_BASE}/api/agent/stream`);
+    // 通过 SSE 订阅 Agent 节点输出和心跳事件。传入当前最大 id，只接收新事件，不加载历史。
+    const afterId = streamEvents.length > 0 ? Math.max(...streamEvents.map((e) => e.id)) : 0;
+    const source = new EventSource(`${API_BASE}/api/agent/stream?after_id=${afterId}`);
     source.addEventListener('open', () => {
       setStreamConnected(true);
     });
@@ -864,6 +951,115 @@ export function App() {
       appendStreamEvent({ id: Date.now() + 2, type: 'error', message: error instanceof Error ? error.message : '提交失败', created_at: new Date().toISOString() });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchTradeAdvice = async () => {
+    setAdviceLoading(true);
+    appendStreamEvent({ id: Date.now(), type: 'local', message: '开始生成 AI 交易建议…', created_at: new Date().toISOString() });
+    setDebugPanelCollapsed(false);
+    try {
+      const advice = await requestJson<TradeAdvice>('/api/mock-trade/advice', { method: 'POST' });
+      if (advice.success) {
+        setTradeForm({
+          direction: advice.suggested_direction === 'short' ? 'short' : 'long',
+          price: '',
+          price_type: advice.suggested_price_type || 'market',
+          amount_usdt: String(advice.suggested_size || ''),
+        });
+        setMessage(`AI 建议：${advice.suggested_direction === 'long' ? '开多' : advice.suggested_direction === 'short' ? '开空' : '观望'} ${advice.suggested_size || ''} USDT · ${advice.reason}`);
+        appendStreamEvent({ id: Date.now() + 1, type: 'local', message: `AI 建议：${advice.suggested_direction === 'long' ? '开多' : advice.suggested_direction === 'short' ? '开空' : '观望'} ${advice.suggested_size || ''} USDT`, created_at: new Date().toISOString(), output: { suggested_direction: advice.suggested_direction, suggested_size: advice.suggested_size, suggested_price_type: advice.suggested_price_type, reason: advice.reason } });
+      } else {
+        setMessage(advice.errors?.[0] || 'AI 建议生成失败');
+        appendStreamEvent({ id: Date.now() + 1, type: 'error', message: `AI 建议生成失败：${advice.errors?.[0] || '未知错误'}`, created_at: new Date().toISOString() });
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '获取建议失败');
+      appendStreamEvent({ id: Date.now() + 2, type: 'error', message: error instanceof Error ? error.message : '获取建议失败', created_at: new Date().toISOString() });
+    } finally {
+      setAdviceLoading(false);
+    }
+  };
+
+  const executeTrade = async () => {
+    const amt = Number(tradeForm.amount_usdt) || 0;
+    if (amt <= 0) {
+      setMessage('请输入数量（USDT）');
+      return;
+    }
+    const priceTypeLabel = tradeForm.price_type === 'market' ? '市价' : '限价';
+    const priceLabel = tradeForm.price_type === 'limit' && tradeForm.price ? `@ ${tradeForm.price} USDT` : '';
+    if (!window.confirm(`确认在 Testnet 执行 ${tradeForm.direction === 'long' ? '开多' : '开空'} ${amt} USDT ${priceTypeLabel}单 ${priceLabel}？`)) return;
+    setLoading(true);
+    try {
+      const result = await requestJson<{ success: boolean; order_id?: string; error?: string; balance?: number }>('/api/mock-trade/execute', {
+        method: 'POST',
+        body: JSON.stringify({ direction: tradeForm.direction, size: 1, price_type: tradeForm.price_type, amount_usdt: amt, price: Number(tradeForm.price) || 0 })
+      });
+      if (result.success) {
+        setMessage(`Testnet 下单成功：订单 ${result.order_id}，余额 ${result.balance}`);
+        appendStreamEvent({ id: Date.now(), type: 'local', message: `Testnet 下单成功：${result.order_id}`, created_at: new Date().toISOString(), output: result });
+      } else {
+        setMessage(`下单失败：${result.error || '未知错误'}`);
+        appendStreamEvent({ id: Date.now(), type: 'error', message: `Testnet 下单失败：${result.error || '未知错误'}`, created_at: new Date().toISOString() });
+      }
+      await loadAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '下单失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+
+  const loadGateData = async () => {
+    try {
+      const [accountData, positionsData, ordersData, tradesData] = await Promise.all([
+        requestJson<GateFuturesAccount>('/api/gate/account').catch(() => null),
+        requestJson<GatePosition[]>('/api/gate/positions').catch(() => []),
+        requestJson<GateOrder[]>('/api/gate/orders?status=open').catch(() => []),
+        requestJson<GateTrade[]>('/api/gate/trades').catch(() => []),
+      ]);
+      setGateFuturesAccount(accountData);
+      setGatePositions(positionsData);
+      setGateOrders(ordersData);
+      setGateTrades(tradesData);
+    } catch { /* ignore */ }
+  };
+
+  const cancelGateOrder = async (orderId: string) => {
+    if (!window.confirm(`确认撤销订单 ${orderId}？`)) return;
+    try {
+      const result = await requestJson<{ order_id?: string; status?: string; error?: string }>('/api/gate/orders/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ order_id: orderId }),
+      });
+      if (result.error) {
+        setMessage(`撤单失败：${result.error}`);
+      } else {
+        setMessage(`订单 ${result.order_id} 已撤销，状态 ${result.status}`);
+        await loadGateData();
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '撤单失败');
+    }
+  };
+
+  const updateGateLeverage = async (leverage: string) => {
+    if (!window.confirm(`确认调整杠杆为 ${leverage}x？`)) return;
+    try {
+      const result = await requestJson<{ contract?: string; leverage?: string; error?: string }>('/api/gate/positions/leverage', {
+        method: 'POST',
+        body: JSON.stringify({ leverage }),
+      });
+      if (result.error) {
+        setMessage(`调杠杆失败：${result.error}`);
+      } else {
+        setMessage(`${result.contract} 杠杆已调整为 ${result.leverage}x`);
+        await loadGateData();
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '调杠杆失败');
     }
   };
 
@@ -1159,7 +1355,7 @@ export function App() {
   );
   const agentRunList = (
     <div className="run-list">
-      {agentRuns.map((run) => (
+      {agentRuns.slice(0, 5).map((run) => (
         <article className="run-card" key={run.id}>
           <div className="run-head">
             <strong>{decisionText(run.decision)}</strong>
@@ -1203,7 +1399,7 @@ export function App() {
         <div>
           <span className="eyebrow"><Bot size={16} /> BTC 分析师智能中枢</span>
           <h1>BTC 分析师追踪与趋势分析系统</h1>
-          <p>集中管理实时行情、分析师观点、预测验证和 LangGraph 报告。</p>
+          <p>集中管理实时行情、分析师观点、预测验证和BTC行情分析报告。</p>
         </div>
         <div className="hero-actions">
           <button className="ghost-button" onClick={loadAll} disabled={loading}>
@@ -1304,15 +1500,17 @@ export function App() {
                   <article
                     className={`stream-item ${event.status === 'failed' || event.type === 'error' ? 'failed' : ''} ${isExpanded ? 'expanded' : ''} ${hasOutput ? 'clickable' : ''}`}
                     key={`${event.type || 'event'}-${event.id}-${event.created_at || ''}`}
-                    onClick={() => hasOutput && setExpandedEventId(isExpanded ? null : event.id)}
                   >
-                    <div className="stream-meta">
+                    <div
+                      className="stream-meta"
+                      onClick={() => hasOutput && setExpandedEventId(isExpanded ? null : event.id)}
+                    >
                       <span>{streamEventTitle(event)} {event.status && event.status !== 'success' ? `· ${event.status}` : ''}</span>
                       <em>{formatDate(event.created_at || undefined)}</em>
                     </div>
-                    <p>{event.message}</p>
+                    <p onClick={() => hasOutput && setExpandedEventId(isExpanded ? null : event.id)}>{event.message}</p>
                     {isExpanded && hasOutput && (
-                      <pre className="stream-detail">{JSON.stringify(event.output, null, 2)}</pre>
+                      <pre className="stream-detail" onClick={(e) => e.stopPropagation()}>{JSON.stringify(event.output, null, 2)}</pre>
                     )}
                   </article>
                 );
@@ -1386,7 +1584,7 @@ export function App() {
             <div className="gate-card-stats">
               {Object.entries(gateStatus).slice(0, 6).map(([key, value]) => {
                 const item = asRecord(value);
-                return <span key={key}>{key}：{formatNumber(Number(item.count || 0), 0)} · {formatDate(String(item.latest || ''))}</span>;
+                return <span key={key}>{GATE_STATUS_LABELS[key] || key}：{formatNumber(Number(item.count || 0), 0)} · {formatDate(String(item.latest || ''))}</span>;
               })}
             </div>
           ) : <div className="empty">暂无数据源状态</div>}
@@ -1436,9 +1634,26 @@ export function App() {
             </div>
             <Send />
           </div>
-          <label>
+          <label className="analyst-combobox-label">
             分析师名称
-            <input value={analystName} onChange={(event) => setAnalystName(event.target.value)} placeholder="例如：Analyst A" />
+            <div className="analyst-combobox">
+              <input
+                value={analystName}
+                onChange={(event) => { setAnalystName(event.target.value); setAnalystDropdownOpen(true); }}
+                onFocus={() => setAnalystDropdownOpen(true)}
+                onBlur={() => setTimeout(() => setAnalystDropdownOpen(false), 150)}
+                placeholder="选择或输入分析师名称"
+              />
+              {analystDropdownOpen && analysts.filter(a => a.name.toLowerCase().includes(analystName.toLowerCase().trim()) || !analystName.trim()).length > 0 && (
+                <ul className="analyst-dropdown">
+                  {analysts
+                    .filter(a => a.name.toLowerCase().includes(analystName.toLowerCase().trim()) || !analystName.trim())
+                    .map(a => (
+                      <li key={a.id} onMouseDown={() => { setAnalystName(a.name); setAnalystDropdownOpen(false); }}>{a.name}<span className="analyst-dropdown-score">评分 {formatNumber(a.total_score)}</span></li>
+                    ))}
+                </ul>
+              )}
+            </div>
           </label>
           <label>
             来源链接
@@ -1581,12 +1796,45 @@ export function App() {
         <div className="panel">
           <div className="panel-title compact">
             <div>
-              <h2>Agent 运行记录</h2>
-              <p>每次分析保留输入摘要、输出和节点过程。</p>
+              <h2>BTC行情分析报告</h2>
+              <p>最新一次 BTC 行情分析，包含市场摘要、分析师共识和风险提示。</p>
             </div>
-            <Bot />
+            <LineChart />
           </div>
-          {agentRunList}
+          <div className="run-list">
+            {reports.length > 0 ? (() => {
+              const report = reports[0];
+              return (
+                <article className="run-card" key={report.id}>
+                  <div className="run-head">
+                    <strong>{report.title}</strong>
+                    <span>{formatDate(report.created_at)}</span>
+                  </div>
+                  <p>{report.data?.executive_summary || report.data?.market_status || '暂无摘要'}</p>
+                  <div className="mini-grid">
+                    <span>支撑 ${formatNumber(report.data?.key_levels?.support)}</span>
+                    <span>压力 ${formatNumber(report.data?.key_levels?.resistance)}</span>
+                    <span>活跃预测 {formatNumber(report.data?.active_prediction_count, 0)}</span>
+                    <span>近期验证 {formatNumber(report.data?.recent_verification_count, 0)}</span>
+                    <span>观点变化 {formatNumber(report.data?.prediction_change_count, 0)}</span>
+                  </div>
+                  {report.data?.analyst_consensus && <p>{report.data.analyst_consensus}</p>}
+                  {report.data?.recent_prediction_review && <p>{report.data.recent_prediction_review}</p>}
+                  {report.data?.prediction_change_review && <p>{report.data.prediction_change_review}</p>}
+                  {report.data?.contract_status && <p className="gate-report-line">{report.data.contract_status}</p>}
+                  {report.data?.sentiment_status && <p className="gate-report-line">{report.data.sentiment_status}</p>}
+                  {report.data?.memory_status && <p className="gate-report-line">{report.data.memory_status}</p>}
+                  {!!report.data?.sentiment_topics?.length && <p className="gate-report-line">情绪主题：{report.data.sentiment_topics.join('、')}</p>}
+                  {!!report.data?.memory_summary?.length && <p className="gate-report-line">记忆摘要：{report.data.memory_summary.join('；')}</p>}
+                  {reportScenarios(report.data?.scenarios).slice(0, 3).map((scenario, index) => (
+                    <p key={`${report.id}-scenario-${index}`}><strong>{scenario.scenario || '情景'}</strong>：{scenario.description || '-'}</p>
+                  ))}
+                  {!!report.data?.risk_warnings?.length && <p>风险提示：{report.data.risk_warnings.join('；')}</p>}
+                  <em>{report.data?.disclaimer || '仅用于信息整理，不构成投资建议。'}</em>
+                </article>
+              );
+            })() : <div className="empty">暂无报告，可点击"生成日报"。</div>}
+          </div>
         </div>
       </section>
 
@@ -1605,7 +1853,7 @@ export function App() {
         <div className="panel">
           <div className="panel-title compact">
             <div>
-              <h2>LangGraph 报告</h2>
+              <h2>BTC行情分析报告</h2>
               <p>由每日 BTC 报告 Graph 生成，包含市场摘要、分析师共识和风险提示。</p>
             </div>
             <BrainCircuit />
@@ -1738,6 +1986,162 @@ export function App() {
         </div>
       </section>
 
+      <section className={activeView === 'mock_trade' ? 'mock-trade-panel' : 'hidden'}>
+        <div className="mock-trade-header">
+          <div className="panel-title compact">
+            <div>
+              <h2>模拟交易</h2>
+              <p>Gate Testnet 模拟账户，AI 建议下单。</p>
+            </div>
+            <div className="inline-actions">
+              <button className="ghost-button" type="button" onClick={loadGateData} disabled={loading}>刷新 Gate 数据</button>
+            </div>
+          </div>
+        </div>
+        <div className="mock-trade-grid">
+          <div className="panel account-panel">
+            <div className="panel-title compact" style={{ marginTop: '1rem' }}>
+              <h3>Gate Testnet 实时</h3>
+            </div>
+            {gateFuturesAccount && !gateFuturesAccount.error ? (
+              <div className="account-card">
+                <div className="account-row"><span>可用余额</span><strong>{gateFuturesAccount.available} USDT</strong></div>
+                <div className="account-row"><span>总权益</span><span>{gateFuturesAccount.total} USDT</span></div>
+                <div className="account-row"><span>仓位保证金</span><span>{gateFuturesAccount.position_margin} USDT</span></div>
+              </div>
+            ) : <div className="empty">{gateFuturesAccount?.error || '未连接 Gate Testnet'}</div>}
+            {gatePositions.length > 0 && !gatePositions[0]?.error ? (
+              <div className="position-list" style={{ marginTop: '0.5rem' }}>
+                {gatePositions.map((pos, idx) => (
+                  <div className="position-card" key={idx}>
+                    <span className={`tag ${Number(pos.size) > 0 ? 'long' : 'short'}`}>{Number(pos.size) > 0 ? '做多' : '做空'}</span>
+                    <span>{pos.contract} {Math.abs(pos.size)} 张</span>
+                    <span>入场 {pos.entry_price}</span>
+                    <span>标记 {pos.mark_price}</span>
+                    {pos.liq_price && <span>强平 {pos.liq_price}</span>}
+                    <span className={Number(pos.unrealised_pnl) >= 0 ? 'up' : 'down'}>未实现 {pos.unrealised_pnl}</span>
+                    <span>杠杆 {pos.leverage}x</span>
+                  </div>
+                ))}
+                <div className="inline-actions" style={{ marginTop: '0.5rem' }}>
+                  {[1, 3, 5, 10, 20].map((lev) => (
+                    <button key={lev} className="ghost-button tiny" type="button" onClick={() => updateGateLeverage(String(lev))}>{lev}x</button>
+                  ))}
+                </div>
+              </div>
+            ) : <div className="empty">Gate 无持仓</div>}
+          </div>
+          <div className="panel trade-form-panel">
+            <div className="panel-title compact"><h3>开单</h3></div>
+            <div className="trade-form">
+              <label>
+                方向
+                <div className="direction-radio">
+                  <label><input type="radio" name="trade-direction" value="long" checked={tradeForm.direction === 'long'} onChange={() => setTradeForm({ ...tradeForm, direction: 'long' })} /> 开多</label>
+                  <label><input type="radio" name="trade-direction" value="short" checked={tradeForm.direction === 'short'} onChange={() => setTradeForm({ ...tradeForm, direction: 'short' })} /> 开空</label>
+                </div>
+              </label>
+              <label>
+                价格类型
+                <select value={tradeForm.price_type} onChange={(event) => setTradeForm({ ...tradeForm, price_type: event.target.value })}>
+                  <option value="market">市价</option>
+                  <option value="limit">限价</option>
+                </select>
+              </label>
+              {tradeForm.price_type === 'limit' && (
+                <label>
+                  委托价格（USDT）
+                  <input type="number" min="0" step="0.01" value={tradeForm.price} onChange={(event) => setTradeForm({ ...tradeForm, price: event.target.value })} placeholder="输入限价" />
+                </label>
+              )}
+              <label>
+                数量（USDT）
+                <input type="number" min="0" step="0.01" value={tradeForm.amount_usdt} onChange={(event) => setTradeForm({ ...tradeForm, amount_usdt: event.target.value })} placeholder="输入 USDT 数量" />
+              </label>
+              <div className="slider-row">
+                <label className="slider-label">快捷数量</label>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={gateFuturesAccount && Number(gateFuturesAccount.available) > 0 ? Math.min(100, Math.round((Number(tradeForm.amount_usdt) || 0) / Number(gateFuturesAccount.available) * 100)) : 0}
+                  onChange={(event) => {
+                    const pct = Number(event.target.value);
+                    const balance = Number(gateFuturesAccount?.available) || 0;
+                    if (balance > 0) {
+                      setTradeForm({ ...tradeForm, amount_usdt: String(Math.max(0, Math.round(balance * pct / 100 * 100) / 100)) });
+                    }
+                  }}
+                />
+                <div className="slider-marks">
+                  <button type="button" className="slider-mark" onClick={() => {
+                    const balance = Number(gateFuturesAccount?.available) || 0;
+                    if (balance > 0) setTradeForm({ ...tradeForm, amount_usdt: String(Math.round(balance * 0.25 * 100) / 100) });
+                  }}>25%</button>
+                  <button type="button" className="slider-mark" onClick={() => {
+                    const balance = Number(gateFuturesAccount?.available) || 0;
+                    if (balance > 0) setTradeForm({ ...tradeForm, amount_usdt: String(Math.round(balance * 0.5 * 100) / 100) });
+                  }}>50%</button>
+                  <button type="button" className="slider-mark" onClick={() => {
+                    const balance = Number(gateFuturesAccount?.available) || 0;
+                    if (balance > 0) setTradeForm({ ...tradeForm, amount_usdt: String(Math.round(balance * 0.75 * 100) / 100) });
+                  }}>75%</button>
+                </div>
+              </div>
+              <div className="trade-actions">
+                <button className="primary-button" type="button" onClick={executeTrade} disabled={loading}><Send size={16} /> 确认交易</button>
+                <button className="ghost-button" type="button" onClick={fetchTradeAdvice} disabled={adviceLoading || loading}><BrainCircuit size={16} /> {adviceLoading ? '建议生成中...' : 'AI 交易建议'}</button>
+              </div>
+            </div>
+          </div>
+          <div className="panel history-panel">
+            <div className="panel-title compact"><h3>Gate 挂单</h3></div>
+            {gateOrders.length > 0 && !gateOrders[0]?.error ? (
+              <table className="trade-history-table">
+                <thead>
+                  <tr><th>订单ID</th><th>合约</th><th>方向</th><th>数量</th><th>价格</th><th>剩余</th><th>TIF</th><th>操作</th></tr>
+                </thead>
+                <tbody>
+                  {gateOrders.map((order) => (
+                    <tr key={order.order_id}>
+                      <td>{order.order_id}</td>
+                      <td>{order.contract}</td>
+                      <td><span className={`tag ${order.size > 0 ? 'long' : 'short'}`}>{order.size > 0 ? '多' : '空'}{order.is_close ? ' 平' : order.reduce_only ? ' 减' : ''}</span></td>
+                      <td>{Math.abs(order.size)}</td>
+                      <td>{order.price}</td>
+                      <td>{order.left}</td>
+                      <td>{order.tif}</td>
+                      <td><button className="ghost-button tiny" type="button" onClick={() => cancelGateOrder(order.order_id)}>撤单</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : <div className="empty">无挂单</div>}
+            <div className="panel-title compact" style={{ marginTop: '1rem' }}><h3>Gate 成交</h3></div>
+            {gateTrades.length > 0 && !gateTrades[0]?.error ? (
+              <table className="trade-history-table">
+                <thead>
+                  <tr><th>成交ID</th><th>合约</th><th>方向</th><th>数量</th><th>成交价</th><th>角色</th></tr>
+                </thead>
+                <tbody>
+                  {gateTrades.map((trade, idx) => (
+                    <tr key={trade.trade_id || idx}>
+                      <td>{trade.trade_id}</td>
+                      <td>{trade.contract}</td>
+                      <td><span className={`tag ${(trade.size || 0) > 0 ? 'long' : 'short'}`}>{(trade.size || 0) > 0 ? '多' : '空'}</span></td>
+                      <td>{Math.abs(trade.size || 0)}</td>
+                      <td>{trade.fill_price || trade.price}</td>
+                      <td>{trade.role}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : <div className="empty">无成交记录</div>}
+          </div>
+        </div>
+      </section>
+
       <section className={activeView === 'settings' ? 'two-columns' : 'hidden'}>
         <div className="panel">
           <div className="panel-title compact">
@@ -1753,6 +2157,7 @@ export function App() {
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('daily_report')} disabled={loading}>生成日报</button>
             <button className="ghost-button" type="button" onClick={() => runGateSync(['gate_btc_contract_sync', 'market_sentiment_build'])} disabled={loading}>同步 Gate/情绪</button>
             <button className="ghost-button" type="button" onClick={() => runGateSync(['gate_square_hot_sync', 'gate_square_user_sync'])} disabled={loading}>同步 Square</button>
+            <button className="ghost-button" type="button" onClick={() => runSchedulerTask('market_memory_compact')} disabled={loading}>保存市场记忆</button>
           </div>
           <div className="run-list">
             {(scheduler?.jobs || []).map((job) => (
@@ -1780,7 +2185,7 @@ export function App() {
                 const item = asRecord(value);
                 return (
                   <div className="setting-item" key={key}>
-                    <strong>{key}</strong>
+                    <strong>{GATE_STATUS_LABELS[key] || key}</strong>
                     <span>{formatNumber(Number(item.count || 0), 0)} 条</span>
                     <small>最新 {formatDate(String(item.latest || ''))}</small>
                   </div>

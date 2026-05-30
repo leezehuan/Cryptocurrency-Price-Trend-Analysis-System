@@ -132,6 +132,16 @@ def start_scheduler() -> None:
         scheduler.add_job(_run_task, "interval", hours=max(1, memory_compact_hours), args=["market_memory_compact"], id="market_memory_compact", replace_existing=True)
         scheduler.add_job(_run_task, "interval", minutes=max(5, gate_info_minutes), args=["gate_info_sync"], id="gate_info_sync", replace_existing=True)
         scheduler.add_job(_run_task, "interval", minutes=max(5, gate_square_user_minutes), args=["gate_square_user_sync"], id="gate_square_user_sync", replace_existing=True)
+    # Mock Trade 定时同步（需启用 scheduler 和 mock_trade 且配置了 API Key）
+    conn3 = connect()
+    try:
+        mock_trade_enabled = bool(get_setting_value(conn3, "mock_trade.enabled", False))
+        mock_trade_api_key = str(get_setting_value(conn3, "mock_trade.testnet_api_key", ""))
+        mock_trade_sync_minutes = int(get_setting_value(conn3, "scheduler.mock_trade_sync_minutes", 5))
+    finally:
+        conn3.close()
+    if enabled and mock_trade_enabled and mock_trade_api_key:
+        scheduler.add_job(_run_task, "interval", minutes=max(1, mock_trade_sync_minutes), args=["mock_trade_sync"], id="mock_trade_sync", replace_existing=True)
     schedule_next_due_verification()
     scheduler.start()
 

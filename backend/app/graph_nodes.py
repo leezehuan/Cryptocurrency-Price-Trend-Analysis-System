@@ -593,7 +593,7 @@ def persist_opinion_node(state: dict[str, Any]) -> dict[str, Any]:
 def _build_gate_context(conn: sqlite3.Connection) -> dict[str, Any]:
     """构建 Gate MCP 增强上下文（合约/情绪/记忆），供 Agent 各流程复用。"""
     try:
-        from .gate_mcp import latest_btc_contract_metrics, latest_sentiment_snapshot, active_market_memories
+        from .gate_sync import latest_btc_contract_metrics, latest_sentiment_snapshot, active_market_memories
         gate_ctx: dict[str, Any] = {
             "contract_metrics": latest_btc_contract_metrics(conn),
             "sentiment_snapshot": latest_sentiment_snapshot(conn),
@@ -1005,14 +1005,11 @@ def persist_agent_run_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def finalize_agent_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
-    analysis_event = "Agent 分析已记录，未创建任何交易或账户记录。"
-    state["analysis_event"] = analysis_event
     output_snapshot = {
         "decision": state["decision"],
         "decision_label": state["decision_label"],
         "risk": state["risk"],
         "signal": state["signal"],
-        "analysis_event": analysis_event,
         "analysis_explanation": output_data(state, "agent_analysis_explanation"),
         "react_tools_used": state.get("react_tools_used", []),
         "react_tool_results": state.get("react_tool_results", {}),
@@ -1026,7 +1023,7 @@ def finalize_agent_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
     result = row_to_dict(row) or {}
     result["output"] = output_snapshot
     state["result"] = result
-    output = standard_node_output("finalize_agent_analysis", {"analysis_event": analysis_event})
+    output = standard_node_output("finalize_agent_analysis", {})
     return apply_node_output(state, "finalize_agent_analysis", output, {"agent_run_id": state.get("agent_run_id")})
 
 
@@ -1320,6 +1317,9 @@ def scenario_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
 
 def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
     # 汇总各节点结果，形成最终日报结构。
+    _sentiment_labels = {"bullish": "看涨", "bearish": "看跌", "sideways": "震荡", "neutral": "中性", "unknown": "未知"}
+    def sentiment_label(val: str) -> str:
+        return _sentiment_labels.get(val, val)
     market_summary_data = output_data(state, "market_summary")
     consensus = output_data(state, "analyst_consensus")
     scenarios = output_data(state, "scenario_analysis")
@@ -1340,10 +1340,10 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
     sentiment_topics: list[str] = []
     if gate_ctx.get("contract_metrics"):
         cm = gate_ctx["contract_metrics"]
-        contract_status = f"合约状态 — mark_price: {cm.get('last_price')}, funding_rate: {cm.get('funding_rate')}, open_interest: {cm.get('open_interest')}"
+        contract_status = f"合约状态 — 标记价格: {cm.get('last_price')}, 资金费率: {cm.get('funding_rate')}, 持仓量: {cm.get('open_interest')}"
     if gate_ctx.get("sentiment_snapshot"):
         ss = gate_ctx["sentiment_snapshot"]
-        sentiment_status = f"情绪快照 — {ss.get('overall_sentiment', 'unknown')}, bull_ratio: {ss.get('bull_ratio')}, bear_ratio: {ss.get('bear_ratio')}"
+        sentiment_status = f"情绪快照 — {sentiment_label(ss.get('overall_sentiment', 'unknown'))}, 看涨占比: {ss.get('bull_ratio')}, 看跌占比: {ss.get('bear_ratio')}"
         try:
             sentiment_topics = json.loads(ss.get("dominant_topics") or "[]")
         except (json.JSONDecodeError, TypeError):

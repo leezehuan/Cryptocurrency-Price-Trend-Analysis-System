@@ -124,9 +124,20 @@ def active_provider_config() -> dict[str, Any]:
     return provider
 
 
-def call_llm_node(graph_name: str, node_name: str, values: dict[str, Any]) -> dict[str, Any]:
+def provider_config(provider_name: str) -> dict[str, Any]:
+    config = load_model_api_config(mask_secrets=False)
+    provider = config.get("providers", {}).get(provider_name or "", {})
+    if not provider:
+        raise LLMClientError(f"model provider '{provider_name}' is not configured")
+    return provider
+
+
+def call_llm_node(graph_name: str, node_name: str, values: dict[str, Any], provider_name: str = "") -> dict[str, Any]:
     prompt = get_node_prompt(graph_name, node_name)
-    provider = active_provider_config()
+    if provider_name:
+        provider = provider_config(provider_name)
+    else:
+        provider = active_provider_config()
     base_url = str(provider.get("base_url") or "").rstrip("/")
     api_key = str(provider.get("api_key") or "")
     model = str(provider.get("chat_model") or "")
@@ -158,6 +169,9 @@ def call_llm_node(graph_name: str, node_name: str, values: dict[str, Any]) -> di
             result = json.loads(response.read().decode("utf-8"))
         content = result["choices"][0]["message"]["content"]
         return normalize_node_output(node_name, extract_json_payload(content))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8") if exc.fp else ""
+        return standard_node_output(node_name, success=False, errors=[f"HTTP {exc.code}: {exc.reason} | {body[:500]}"])
     except (KeyError, IndexError, json.JSONDecodeError, urllib.error.URLError, TimeoutError, LLMClientError) as exc:
         return standard_node_output(node_name, success=False, errors=[str(exc)])
 

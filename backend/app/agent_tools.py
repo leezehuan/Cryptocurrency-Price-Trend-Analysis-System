@@ -28,7 +28,7 @@ def gate_market_research(conn: sqlite3.Connection | None, **kwargs: Any) -> dict
     }
     if kwargs.get("metadata_only"):
         return {"name": "gate_market_research", "prompt": tool_prompt}
-    from .gate_mcp import latest_btc_contract_metrics
+    from .gate_sync import latest_btc_contract_metrics
 
     metrics = latest_btc_contract_metrics(conn)
     if not metrics:
@@ -143,7 +143,7 @@ def gate_square_research(conn: sqlite3.Connection | None, **kwargs: Any) -> dict
     }
     if kwargs.get("metadata_only"):
         return {"name": "gate_square_research", "prompt": tool_prompt}
-    from .gate_mcp import recent_square_posts, recent_followed_user_posts
+    from .gate_sync import recent_square_posts, recent_followed_user_posts
 
     hot_posts = recent_square_posts(conn, limit=10)
     followed_posts = recent_followed_user_posts(conn, limit=10)
@@ -170,7 +170,7 @@ def market_memory_search(conn: sqlite3.Connection | None, **kwargs: Any) -> dict
     }
     if kwargs.get("metadata_only"):
         return {"name": "market_memory_search", "prompt": tool_prompt}
-    from .gate_mcp import active_market_memories
+    from .gate_sync import active_market_memories
 
     symbol = kwargs.get("symbol", "BTCUSDT")
     limit = int(kwargs.get("limit", 20))

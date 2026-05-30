@@ -131,7 +131,7 @@ def latest_market(
     # 获取指定交易对、市场类型和周期下的最新一根 K 线及指标。
     symbol = symbol or str(get_setting_value(conn, "market.symbol", "BTCUSDT"))
     interval = interval or str(get_setting_value(conn, "market.default_interval", "1h"))
-    market_type = market_type or "spot"
+    market_type = market_type or "perpetual"
     row = conn.execute(
         """
         SELECT
@@ -250,7 +250,7 @@ def market_series(
     # 查询行情序列并按时间升序返回，便于前端直接绘图。
     symbol = symbol or str(get_setting_value(conn, "market.symbol", "BTCUSDT"))
     interval = interval or str(get_setting_value(conn, "market.default_interval", "1h"))
-    market_type = market_type or "spot"
+    market_type = market_type or "perpetual"
     rows = conn.execute(
         """
         SELECT
@@ -1239,7 +1239,7 @@ def daily_report_context(conn: sqlite3.Connection) -> dict[str, Any]:
     # Gate MCP 增强上下文（只读附加，失败不影响主流程）
     gate_context: dict[str, Any] = {}
     try:
-        from .gate_mcp import latest_btc_contract_metrics, latest_sentiment_snapshot, active_market_memories
+        from .gate_sync import latest_btc_contract_metrics, latest_sentiment_snapshot, active_market_memories
         gate_context["btc_contract"] = latest_btc_contract_metrics(conn)
         gate_context["sentiment"] = latest_sentiment_snapshot(conn)
         gate_context["memories"] = active_market_memories(conn, limit=10)
@@ -1386,7 +1386,7 @@ def build_agent_analysis_signal(conn: sqlite3.Connection) -> dict[str, Any]:
     # Gate MCP 增强信号（只读附加，失败不影响核心信号）
     gate_signal: dict[str, Any] = {}
     try:
-        from .gate_mcp import latest_btc_contract_metrics, latest_sentiment_snapshot
+        from .gate_sync import latest_btc_contract_metrics, latest_sentiment_snapshot
         gate_signal["btc_contract"] = latest_btc_contract_metrics(conn)
         gate_signal["sentiment"] = latest_sentiment_snapshot(conn)
         sentiment = gate_signal.get("sentiment", {})
@@ -1879,32 +1879,32 @@ def run_scheduled_daily_report(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def run_scheduled_gate_btc_sync(conn: sqlite3.Connection) -> dict[str, Any]:
-    from .gate_mcp import sync_btc_contract_metrics
+    from .gate_sync import sync_btc_contract_metrics
     return sync_btc_contract_metrics(conn)
 
 
 def run_scheduled_gate_news_sync(conn: sqlite3.Connection) -> dict[str, Any]:
-    from .gate_mcp import sync_gate_news
+    from .content_sync import sync_gate_news
     return sync_gate_news(conn)
 
 
 def run_scheduled_gate_square_sync(conn: sqlite3.Connection) -> dict[str, Any]:
-    from .gate_mcp import sync_gate_square_hot
+    from .content_sync import sync_gate_square_hot
     return sync_gate_square_hot(conn)
 
 
 def run_scheduled_sentiment_build(conn: sqlite3.Connection) -> dict[str, Any]:
-    from .gate_mcp import build_market_sentiment_snapshot
+    from .gate_sync import build_market_sentiment_snapshot
     return build_market_sentiment_snapshot(conn)
 
 
 def run_scheduled_memory_compact(conn: sqlite3.Connection) -> dict[str, Any]:
-    from .gate_mcp import compact_market_memories
+    from .gate_sync import compact_market_memories
     return compact_market_memories(conn)
 
 
 def run_scheduled_gate_square_user_sync(conn: sqlite3.Connection) -> dict[str, Any]:
-    from .gate_mcp import sync_gate_square_user_opinions
+    from .content_sync import sync_gate_square_user_opinions
     return sync_gate_square_user_opinions(conn)
 
 
@@ -1936,6 +1936,9 @@ def run_scheduled_task(conn: sqlite3.Connection, task_name: str) -> dict[str, An
             result = run_scheduled_gate_square_user_sync(conn)
         elif task_name == "gate_info_sync":
             result = run_scheduled_gate_info_sync(conn)
+        elif task_name == "mock_trade_sync":
+            from .mock_trade import sync_mock_account_state
+            result = sync_mock_account_state(conn)
         else:
             raise ValueError(f"unknown scheduled task: {task_name}")
     except Exception as exc:

@@ -901,6 +901,54 @@
         }
       }
     },
+    "mock_trade": {
+      "advice": {
+        "system": [
+          "你是加密货币市场分析系统的模拟操作助手。",
+          "你的任务是根据当前行情、Agent 分析信号和 Gate Testnet 账户状态，给出一条保守的模拟操作方向建议，仅用于测试系统功能。",
+          "不得给出真实投资建议，不得承诺收益，必须提示风险。"
+        ],
+        "user_template": [
+          "【输入】",
+          "当前 BTC 价格：",
+          "{current_price}",
+          "",
+          "Agent 分析信号：",
+          "{analysis_signal}",
+          "",
+          "Gate Testnet 账户状态：",
+          "可用余额：{available_balance} USDT",
+          "总权益：{total_equity} USDT",
+          "仓位保证金：{position_margin} USDT",
+          "",
+          "当前持仓：",
+          "{position_summary}",
+          "",
+          "合约：",
+          "{contract}",
+          "",
+          "【任务】",
+          "基于以上信息，给出一条模拟操作方向建议，包含具体的下单金额（USDT）。",
+          "",
+          "【规则】",
+          "- 如果 Agent 信号为 observe 或 confidence 为 low，建议 hold（观望），suggested_size 设为 0。",
+          "- 如果有反向持仓，建议先平掉再反向建立。",
+          "- suggested_size 为下单金额（USDT），不是张数。系统会自动换算为合约张数。",
+          "- 建议下单金额不超过可用余额的 10%，保守操作建议 5% 以内。",
+          "- 必须说明理由和风险提示。",
+          "- 不得给出保证盈利的预测。",
+          "",
+          "【输出】",
+          "请输出标准 JSON，data 字段包含：suggested_direction（long/short/hold）、suggested_size（USDT 金额，浮点数）、suggested_price_type（market/limit）、reason（理由和风险提示）。"
+        ],
+        "output_schema": {
+          "suggested_direction": "long|short|hold",
+          "suggested_size": 0.0,
+          "suggested_price_type": "market|limit",
+          "reason": "string"
+        }
+      }
+    },
     "daily_report": {
       "market_summary": {
         "system": [
