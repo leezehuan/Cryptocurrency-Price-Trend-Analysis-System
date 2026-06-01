@@ -8,7 +8,7 @@
       "api_key": "",
       "chat_model": "gpt-4o-mini",
       "temperature": 0.2,
-      "max_tokens": 1200,
+      "max_tokens": 4000,
       "timeout_seconds": 30
     },
     "local_ollama": {
