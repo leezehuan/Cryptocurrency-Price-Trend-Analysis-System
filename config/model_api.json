@@ -3,7 +3,7 @@
   "providers": {
     "openai_compatible": {
       "name": "OpenAI Compatible API",
-      "base_url": "https://cf-api.aabao.top/v1",
+      "base_url": "https://api.mnapi.com/v1",
       "api_key_env": "OPENAI_API_KEY",
       "api_key": "",
       "chat_model": "gpt-4o-mini",

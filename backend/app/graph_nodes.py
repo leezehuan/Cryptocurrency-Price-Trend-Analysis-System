@@ -210,6 +210,41 @@ def record_node(state: dict[str, Any], node_name: str, output: dict[str, Any], i
         pass
 
 
+def record_intermediate(state: dict[str, Any], step_type: str, step_name: str, data: dict[str, Any], status: str = "success", error: str = "") -> None:
+    # 将 tool/skill/LLM 等中间步骤记录到 agent_node_runs，供调试窗口实时展示。
+    # step_type 前缀如 "tool"、"skill"、"llm"，node_name 格式为 "tool:gate_market_research"。
+    conn: sqlite3.Connection = state.get("conn")  # type: ignore[assignment]
+    if not conn:
+        return
+    node_name = f"{step_type}:{step_name}" if step_type else step_name
+    now = utc_now()
+    output = standard_node_output(node_name, data, success=(status == "success"), errors=[error] if error else [])
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO agent_node_runs (
+                agent_run_id, graph_name, node_name, status, input_snapshot, output_snapshot,
+                error_message, started_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                state.get("agent_run_id"),
+                state.get("graph_name", "unknown"),
+                node_name,
+                status,
+                as_json({"step_type": step_type, "step_name": step_name}),
+                as_json(output),
+                error,
+                now,
+                now,
+            ),
+        )
+        state.setdefault("node_run_ids", []).append(cursor.lastrowid)
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
 def apply_node_output(state: dict[str, Any], node_name: str, output: dict[str, Any], input_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     # 合并节点输出、收集警告错误，并持久化节点运行记录。
     node_outputs = dict(state.get("node_outputs") or {})
@@ -240,7 +275,9 @@ def llm_or_fallback(
     except Exception as exc:
         output = standard_node_output(node_name, success=False, errors=[str(exc)])
     if output.get("success"):
+        record_intermediate(state, "llm", f"{graph_name}.{node_name}", {"prompt_keys": list(values.keys()), "data_preview": str(output.get("data", ""))[:200]})
         return output
+    record_intermediate(state, "llm", f"{graph_name}.{node_name}", {"error": output.get("errors", []), "fallback_used": True}, status="failed", error="；".join(output.get("errors") or []))
     return standard_node_output(
         node_name,
         data=fallback,
@@ -791,9 +828,15 @@ def react_tool_selection_node(state: dict[str, Any]) -> dict[str, Any]:
     tool_results: dict[str, Any] = {}
 
     for tool_name in selected_tools:
-        result = run_agent_tool(conn, tool_name)
-        tools_called.append(tool_name)
-        tool_results[tool_name] = result
+        try:
+            result = run_agent_tool(conn, tool_name)
+            tools_called.append(tool_name)
+            tool_results[tool_name] = result
+            record_intermediate(state, "tool", tool_name, {"found": result.get("found"), "summary": str(result)[:200]})
+        except Exception as tool_exc:
+            tools_called.append(tool_name)
+            tool_results[tool_name] = {"error": str(tool_exc)}
+            record_intermediate(state, "tool", tool_name, {"error": str(tool_exc)}, status="failed", error=str(tool_exc))
         if tool_name == "gate_market_research":
             if result.get("found") and result.get("contract_metrics"):
                 gate_ctx["contract_metrics"] = result["contract_metrics"]
@@ -1385,6 +1428,17 @@ def daily_report_node(state: dict[str, Any]) -> dict[str, Any]:
         fallback,
     )
     report = {**fallback, **(output.get("data") or {})}
+    # 规范化 scenarios：LLM 可能返回字符串列表或缺少 scenario/description 的对象，
+    # 此时回退使用 scenario_analysis 节点的结构化输出。
+    raw_scenarios = report.get("scenarios")
+    well_structured = (
+        isinstance(raw_scenarios, list)
+        and raw_scenarios
+        and isinstance(raw_scenarios[0], dict)
+        and (raw_scenarios[0].get("scenario") or raw_scenarios[0].get("description"))
+    )
+    if not well_structured:
+        report["scenarios"] = list(scenarios.values()) if scenarios else []
     output["data"] = report
     state["report"] = report
     return apply_node_output(state, "daily_report", output, report)

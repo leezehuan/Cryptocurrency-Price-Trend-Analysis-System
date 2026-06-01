@@ -63,6 +63,7 @@ DEFAULT_SETTINGS: dict[str, tuple[Any, str, str]] = {
     "gate_mcp.enabled": (False, "bool", "是否启用 Gate MCP 数据源"),
     "gate_mcp.timeout_seconds": (30, "int", "Gate MCP 请求超时秒数"),
     "scheduler.gate_btc_sync_minutes": (5, "int", "Gate BTC 合约数据同步间隔分钟数"),
+    "scheduler.gate_btc_kline_sync_minutes": (15, "int", "Gate BTC 合约 K 线行情同步间隔分钟数"),
     "scheduler.gate_news_sync_minutes": (30, "int", "Gate 资讯同步间隔分钟数"),
     "scheduler.gate_square_sync_minutes": (60, "int", "Gate Square 热门同步间隔分钟数"),
     "scheduler.sentiment_build_minutes": (15, "int", "市场情绪快照构建间隔分钟数"),

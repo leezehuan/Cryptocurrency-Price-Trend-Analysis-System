@@ -1883,6 +1883,11 @@ def run_scheduled_gate_btc_sync(conn: sqlite3.Connection) -> dict[str, Any]:
     return sync_btc_contract_metrics(conn)
 
 
+def run_scheduled_gate_btc_kline_sync(conn: sqlite3.Connection) -> dict[str, Any]:
+    from .gate_sync import sync_btc_contract_klines
+    return sync_btc_contract_klines(conn)
+
+
 def run_scheduled_gate_news_sync(conn: sqlite3.Connection) -> dict[str, Any]:
     from .content_sync import sync_gate_news
     return sync_gate_news(conn)
@@ -1924,6 +1929,8 @@ def run_scheduled_task(conn: sqlite3.Connection, task_name: str) -> dict[str, An
             result = run_scheduled_daily_report(conn)
         elif task_name == "gate_btc_contract_sync":
             result = run_scheduled_gate_btc_sync(conn)
+        elif task_name == "gate_btc_kline_sync":
+            result = run_scheduled_gate_btc_kline_sync(conn)
         elif task_name == "gate_news_sync":
             result = run_scheduled_gate_news_sync(conn)
         elif task_name == "gate_square_hot_sync":
@@ -1992,6 +1999,7 @@ def list_agent_stream_events(conn: sqlite3.Connection, after_id: int = 0, limit:
     for row in rows_to_dicts(rows):
         output = localize_display_payload(json.loads(row.get("output_snapshot") or "{}"))
         data = output.get("data") or {}
+        node_name = str(row.get("node_name") or "")
         summary = ""
         if isinstance(data, dict):
             summary = (
@@ -2003,6 +2011,26 @@ def list_agent_stream_events(conn: sqlite3.Connection, after_id: int = 0, limit:
                 or data.get("plain_language_summary")
                 or ""
             )
+        # 中间步骤（tool/skill/llm）的友好摘要
+        if not summary and node_name.startswith("tool:"):
+            tool_name = node_name[5:]
+            if data.get("error"):
+                summary = f"Tool {tool_name} 调用失败：{data['error']}"
+            elif data.get("found"):
+                summary = f"Tool {tool_name} 返回结果"
+            else:
+                summary = f"Tool {tool_name} 无匹配结果"
+        elif not summary and node_name.startswith("skill:"):
+            skill_name = node_name[6:]
+            summary = f"Skill {skill_name} 执行完成"
+        elif not summary and node_name.startswith("llm:"):
+            llm_name = node_name[4:]
+            if data.get("fallback_used"):
+                summary = f"LLM {llm_name} 失败，已使用规则回退"
+            elif data.get("error"):
+                summary = f"LLM {llm_name} 调用失败"
+            else:
+                summary = f"LLM {llm_name} 调用成功"
         if not summary:
             summary = "节点输出已更新"
         events.append(

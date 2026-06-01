@@ -632,7 +632,11 @@ function streamEventTitle(event: AgentStreamEvent): string {
   if (event.type === 'local') return '界面操作';
   if (event.type === 'error') return '连接异常';
   if (event.type === 'heartbeat') return '等待中';
-  return `${event.graph_name || 'agent'} · ${event.node_name || 'output'}`;
+  const nn = event.node_name || 'output';
+  if (nn.startsWith('tool:')) return `🔧 Tool · ${nn.slice(5)}`;
+  if (nn.startsWith('skill:')) return `⚡ Skill · ${nn.slice(6)}`;
+  if (nn.startsWith('llm:')) return `🤖 LLM · ${nn.slice(4)}`;
+  return `${event.graph_name || 'agent'} · ${nn}`;
 }
 
 function reportScenarios(value?: ReportScenario[] | Record<string, ReportScenario>): ReportScenario[] {
@@ -2170,6 +2174,7 @@ export function App() {
           <div className="inline-actions">
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('verify_due')} disabled={loading}>验证到期</button>
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('market_sync')} disabled={loading}>同步行情</button>
+            <button className="ghost-button" type="button" onClick={() => runSchedulerTask('gate_btc_kline_sync')} disabled={loading}>同步 K 线</button>
             <button className="ghost-button" type="button" onClick={() => runSchedulerTask('daily_report')} disabled={loading}>生成日报</button>
             <button className="ghost-button" type="button" onClick={() => runGateSync(['gate_btc_contract_sync', 'market_sentiment_build'])} disabled={loading}>同步 Gate/情绪</button>
             <button className="ghost-button" type="button" onClick={() => runGateSync(['gate_square_hot_sync', 'gate_square_user_sync'])} disabled={loading}>同步 Square</button>

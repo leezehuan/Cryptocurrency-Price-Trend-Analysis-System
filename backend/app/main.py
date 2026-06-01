@@ -353,8 +353,8 @@ async def get_agent_stream(after_id: int = Query(default=0, ge=0)) -> StreamingR
         # 使用 SSE 持续推送 Agent 节点输出；无新事件时发送心跳。
         # 以当前数据库最大 id 为起点，只推送新事件，不回溯历史。
         with connect() as conn:
-            max_row = conn.execute("SELECT MAX(id) FROM agent_node_runs").fetchone()
-        last_id = max(after_id, int(max_row[0]) if max_row and max_row[0] else 0)
+            max_row = conn.execute("SELECT MAX(id) as max_id FROM agent_node_runs").fetchone()
+        last_id = max(after_id, int(max_row["max_id"]) if max_row and max_row["max_id"] else 0)
         while True:
             if _shutdown_event is not None and _shutdown_event.is_set():
                 break
@@ -474,7 +474,7 @@ def post_gate_sync(
     db: sqlite3.Connection = Depends(get_db),
 ) -> dict[str, object]:
     allowed = {
-        "gate_btc_contract_sync", "gate_news_sync",
+        "gate_btc_contract_sync", "gate_btc_kline_sync", "gate_news_sync",
         "gate_square_hot_sync", "market_sentiment_build",
         "market_memory_compact", "gate_square_user_sync",
         "gate_info_sync",

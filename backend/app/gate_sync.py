@@ -107,14 +107,10 @@ def sync_btc_contract_metrics(conn: sqlite3.Connection, client: GateMCPClient | 
 def _btc_metrics_and_chained(conn: sqlite3.Connection, client: GateMCPClient | None, ticker: dict[str, Any], source: str) -> dict[str, Any]:
     now = utc_now()
     fetched_at = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
-    # A2: 串联 K 线和资金费率历史同步（失败不影响 ticker 结果）
-    kline_result: dict[str, Any] = {}
+    # A2: 串联资金费率历史和合约上下文同步（失败不影响 ticker 结果）
+    # K 线同步已拆为独立定时任务 gate_btc_kline_sync，不再在此串联
     funding_result: dict[str, Any] = {}
     context_result: dict[str, Any] = {}
-    try:
-        kline_result = sync_btc_contract_klines(conn, client)
-    except Exception as exc:
-        kline_result = {"synced": False, "error": str(exc)}
     try:
         funding_result = sync_btc_funding_rate_history(conn, client)
     except Exception as exc:
@@ -131,7 +127,6 @@ def _btc_metrics_and_chained(conn: sqlite3.Connection, client: GateMCPClient | N
         "funding_rate": _float(ticker.get("funding_rate")),
         "fetched_at": fetched_at,
         "source": source,
-        "klines": kline_result,
         "funding_history": funding_result,
         "context": context_result,
     }

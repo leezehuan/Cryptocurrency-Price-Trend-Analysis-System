@@ -111,6 +111,14 @@ def start_scheduler() -> None:
     if enabled:
         scheduler.add_job(_run_task, "interval", minutes=max(1, market_sync_minutes), args=["market_sync"], id="market_sync", replace_existing=True)
         scheduler.add_job(_run_task, "cron", hour=max(0, min(23, daily_report_hour)), minute=0, args=["daily_report"], id="daily_report", replace_existing=True)
+    # K 线行情定时同步（只需 scheduler.enabled，使用 Gate REST API，不依赖 gate_mcp）
+    conn_kline = connect()
+    try:
+        kline_minutes = int(get_setting_value(conn_kline, "scheduler.gate_btc_kline_sync_minutes", 15))
+    finally:
+        conn_kline.close()
+    if enabled:
+        scheduler.add_job(_run_task, "interval", minutes=max(5, kline_minutes), args=["gate_btc_kline_sync"], id="gate_btc_kline_sync", replace_existing=True)
     # Gate MCP 数据源定时任务（需同时启用 scheduler 和 gate_mcp）
     conn2 = connect()
     try:
